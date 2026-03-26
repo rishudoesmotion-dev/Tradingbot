@@ -24,6 +24,8 @@ interface ScripMasterRecord {
   lLotSize: number;
   pInstrName: string;
   lExpiryDate?: number;
+  /** Instrument token (pTok). Required by Quotes neosymbol API for F&O segments. */
+  pTok?: string;
   segment: string;
 }
 
@@ -95,10 +97,19 @@ async function downloadScripMaster(): Promise<void> {
 
       console.log(`   ✓ Cleared old records for ${segment}`);
 
-      // Insert new records in batches
+      // Insert new records in batches (map to snake_case for Supabase)
       const batchSize = 500;
       for (let i = 0; i < records.length; i += batchSize) {
-        const batch = records.slice(i, i + batchSize);
+        const batch = records.slice(i, i + batchSize).map(r => ({
+          p_symbol:     r.pSymbol,
+          p_exch_seg:   r.pExchSeg,
+          p_trd_symbol: r.pTrdSymbol,
+          l_lot_size:   r.lLotSize,
+          p_instr_name: r.pInstrName,
+          l_expiry_date: r.lExpiryDate,
+          p_tok:        r.pTok || null,
+          segment:      r.segment,
+        }));
         const { error } = await supabase
           .from('scrip_master')
           .insert(batch);
@@ -153,13 +164,23 @@ function parseCSV(csvText: string, segment: string): ScripMasterRecord[] {
   const headers = lines[0].split(',').map(h => h.trim());
   const records: ScripMasterRecord[] = [];
 
-  // Find column indices
-  const pSymbolIdx = headers.indexOf('pSymbol');
-  const pExchSegIdx = headers.indexOf('pExchSeg');
-  const pTrdSymbolIdx = headers.indexOf('pTrdSymbol');
-  const lLotSizeIdx = headers.indexOf('lLotSize');
-  const pInstrNameIdx = headers.indexOf('pInstrName');
-  const lExpiryDateIdx = headers.indexOf('lExpiryDate');
+  // Find column indices (case-sensitive first, fallback to lowercase compare)
+  const findIdx = (...names: string[]) => {
+    for (const name of names) {
+      const idx = headers.findIndex(h => h.toLowerCase() === name.toLowerCase());
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const pSymbolIdx      = findIdx('pSymbol', 'symbol');
+  const pExchSegIdx     = findIdx('pExchSeg', 'exch_seg', 'exchange_segment');
+  const pTrdSymbolIdx   = findIdx('pTrdSymbol', 'trading_symbol', 'tradingsymbol');
+  const lLotSizeIdx     = findIdx('lLotSize', 'lot_size', 'lotsize');
+  const pInstrNameIdx   = findIdx('pInstrName', 'instr_name', 'instrument_name', 'name');
+  const lExpiryDateIdx  = findIdx('lExpiryDate', 'expiry_date', 'expirydate');
+  // Instrument token — needed by Quotes neosymbol API for F&O
+  const pTokIdx         = findIdx('pTok', 'tok', 'token', 'instrument_token');
 
   if (pSymbolIdx === -1 || pTrdSymbolIdx === -1) {
     throw new Error('CSV missing required columns (pSymbol, pTrdSymbol)');
@@ -172,13 +193,14 @@ function parseCSV(csvText: string, segment: string): ScripMasterRecord[] {
     if (values.length < pSymbolIdx + 1) continue;
 
     records.push({
-      pSymbol: values[pSymbolIdx],
-      pExchSeg: pExchSegIdx !== -1 ? values[pExchSegIdx] : segment,
-      pTrdSymbol: values[pTrdSymbolIdx],
-      lLotSize: lLotSizeIdx !== -1 ? parseInt(values[lLotSizeIdx]) || 1 : 1,
-      pInstrName: pInstrNameIdx !== -1 ? values[pInstrNameIdx] : '',
+      pSymbol:     values[pSymbolIdx],
+      pExchSeg:    pExchSegIdx !== -1 ? values[pExchSegIdx] : segment,
+      pTrdSymbol:  values[pTrdSymbolIdx],
+      lLotSize:    lLotSizeIdx !== -1 ? parseInt(values[lLotSizeIdx]) || 1 : 1,
+      pInstrName:  pInstrNameIdx !== -1 ? values[pInstrNameIdx] : '',
       lExpiryDate: lExpiryDateIdx !== -1 ? parseInt(values[lExpiryDateIdx]) : undefined,
-      segment: segment,
+      pTok:        pTokIdx !== -1 && values[pTokIdx] ? values[pTokIdx] : undefined,
+      segment:     segment,
     });
   }
 

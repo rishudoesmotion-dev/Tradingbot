@@ -58,8 +58,9 @@ export interface Database {
           pnl: number;
           pnl_percentage: number;
           updated_at: string;
+          created_at: string;
         };
-        Insert: Omit<Database['public']['Tables']['positions']['Row'], 'id' | 'updated_at'>;
+        Insert: Omit<Database['public']['Tables']['positions']['Row'], 'id' | 'updated_at' | 'created_at'>;
         Update: Partial<Database['public']['Tables']['positions']['Insert']>;
       };
     };

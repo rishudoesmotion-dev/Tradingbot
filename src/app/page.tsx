@@ -130,7 +130,13 @@ export default function Home() {
           {/* Trading Tab */}
           <TabsContent value="trading" className="mt-6">
             {isAuthenticated ? (
-              <TradingPanel sessionInfo={sessionInfo} />
+              <TradingPanel
+                sessionInfo={sessionInfo}
+                onSessionExpired={() => {
+                  handleLogout();
+                  setShowLogin(true);
+                }}
+              />
             ) : (
               <div className="bg-white rounded-lg border border-gray-200 p-8 text-center">
                 <h3 className="text-lg font-semibold text-gray-900 mb-2">

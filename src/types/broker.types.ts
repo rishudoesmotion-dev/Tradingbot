@@ -49,7 +49,8 @@ export interface Order {
   orderType: OrderType;
   productType: ProductType;
   status: OrderStatus;
-  timestamp: Date;
+  timestamp: Date;        // Order placed time
+  fillTimestamp?: Date;   // Trade execution time (fill time)
   message?: string;
 }
 
@@ -62,6 +63,9 @@ export interface Position {
   sellQuantity: number;
   buyPrice: number;
   sellPrice: number;
+  avgPrice?: number;      // net average price for display (buy avg for long, sell avg for short)
+  rawBuyAmt?: number;     // original buyAmt from broker — used for accurate P&L (no rounding drift)
+  rawSellAmt?: number;    // original sellAmt from broker — used for accurate P&L
   ltp: number;
   pnl: number;
   pnlPercentage: number;

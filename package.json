@@ -9,7 +9,9 @@
     "lint": "next lint",
     "resync": "node scripts/resync.js",
     "resync:ts": "ts-node scripts/resync-scrips.ts",
-    "resync:interactive": "node scripts/resync-interactive.js"
+    "resync:interactive": "node scripts/resync-interactive.js",
+    "test:rules": "ts-node --require tsconfig-paths/register --project tsconfig.test.json test-servers/trading-rules-test.ts",
+    "test:rules:watch": "nodemon --exec ts-node --require tsconfig-paths/register --project tsconfig.test.json test-servers/trading-rules-test.ts"
   },
   "dependencies": {
     "@radix-ui/react-tabs": "^1.0.4",
@@ -31,10 +33,13 @@
     "@types/react": "^18",
     "@types/react-dom": "^18",
     "autoprefixer": "^10.4.18",
+    "dotenv": "^17.3.1",
     "eslint": "^8",
     "eslint-config-next": "14.2.3",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5"
   }
 }

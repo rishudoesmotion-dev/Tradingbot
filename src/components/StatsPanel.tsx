@@ -2,6 +2,7 @@
 
 import { useTradingStore } from '@/store/tradingStore';
 import { TrendingUp, TrendingDown, Wallet, Percent } from 'lucide-react';
+import { ExpiryDisplay } from './ExpiryDisplay';
 
 export default function StatsPanel() {
   const { positions, orders } = useTradingStore();
@@ -135,6 +136,9 @@ export default function StatsPanel() {
           <p className="text-2xl font-bold text-gray-700">{orders.length}</p>
         </div>
       </div>
+
+      {/* Next Expiry Info */}
+      <ExpiryDisplay />
     </div>
   );
 }

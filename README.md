@@ -1,7 +1,7 @@
 // README.md
-# Trading Terminal - Broker-Agnostic Platform
+# Trading Terminal - Professional Derivatives Trading Platform
 
-A professional trading terminal built with **Next.js**, **Clean Architecture**, and strict **Risk Management**. Currently supports Shoonya API with easy extensibility to other brokers.
+A professional trading terminal built with **Next.js**, **Clean Architecture**, and strict **Risk Management**. Currently supports Kotak Neo API with a broker-agnostic architecture for easy extensibility.
 
 ## 🏗️ Architecture
 
@@ -17,44 +17,51 @@ A professional trading terminal built with **Next.js**, **Clean Architecture**, 
 │         Business Logic Layer                │
 │  - Risk Manager (Money Management)          │
 │  - Trading Rules & Validations              │
+│  - Options Chain Analysis                   │
 └────────────────┬────────────────────────────┘
                  │
 ┌────────────────▼────────────────────────────┐
 │      Infrastructure Layer                   │
-│  - Broker Adapters (Shoonya, Zerodha, etc.) │
-│  - Database (Supabase)                      │
-│  - WebSocket Services                       │
+│  - Broker Adapters (Kotak Neo)              │
+│  - Database (Supabase PostgreSQL)           │
+│  - WebSocket Services for Live Data         │
 └─────────────────────────────────────────────┘
 ```
 
 ## 🚀 Features
 
 ### ✅ Risk Management (Money Management Engine)
-- ✅ **Trade Counter**: Limits maximum trades per day
+- ✅ **Trade Counter**: Limits maximum 3 trades per day
 - ✅ **Loss Guard**: Auto-blocks trading when loss limit is reached
-- ✅ **Lot Size Validator**: Enforces position size limits
+- ✅ **Lot Size Validator**: Enforces 1 lot per order maximum
+- ✅ **Concurrent Positions**: No concurrent live trades allowed
 - ✅ **Kill Switch**: Emergency button to exit all positions
+- ✅ **Master Control**: Rule -1 must be enabled to trade
 
 ### ✅ Trading Features
-- ✅ Real-time Order Book
+- ✅ Real-time Options Chain with Greeks
 - ✅ Live Position Tracking with P&L
+- ✅ NIFTY Options (CE/PE) Trading
 - ✅ One-Click Trading with preset lot sizes
 - ✅ Real-time Statistics Dashboard
-- ✅ WebSocket support for market data
+- ✅ Daily P&L Calendar View
+- ✅ WebSocket support for live market data
+- ✅ Login/Authentication with Kotak Neo
+- ✅ Account Balance & Position Monitoring
 
 ### ✅ Broker Support
-- ✅ **Shoonya (Finvasia)** - Fully implemented
-- 🔄 **Zerodha** - Coming soon
-- 🔄 **Others** - Extensible architecture
+- ✅ **Kotak Neo (Kotak Securities)** - Fully implemented
+- 🔄 **Other Brokers** - Extensible architecture ready
 
 ## 📦 Tech Stack
 
-- **Frontend**: Next.js 14 (App Router), React, TypeScript
+- **Frontend**: Next.js 14 (App Router), React 18, TypeScript
 - **Styling**: Tailwind CSS, Shadcn/UI
-- **State Management**: Zustand
-- **Real-time Data**: Socket.io, WebSockets
+- **State Management**: Custom React Hooks
+- **Real-time Data**: WebSocket (Kotak Neo WebSocket SDK)
 - **Database**: Supabase (PostgreSQL)
-- **Deployment**: Vercel (Frontend), Railway/Render (WebSocket Server)
+- **API Integration**: Kotak Neo REST & WebSocket APIs
+- **Deployment**: Vercel (Frontend)
 
 ## 🛠️ Setup Instructions
 
@@ -64,7 +71,8 @@ A professional trading terminal built with **Next.js**, **Clean Architecture**, 
 Node.js >= 18.x
 npm or yarn
 Supabase account
-Shoonya API credentials
+Kotak Securities account with NEO trading terminal
+Kotak Neo API credentials
 ```
 
 ### 2. Install Dependencies
@@ -84,76 +92,41 @@ cp .env.example .env.local
 Configure your environment variables:
 
 ```env
-# Risk Management
-MAX_TRADES_PER_DAY=5
-MAX_LOSS_LIMIT=5000
-MAX_LOTS=10
+# Kotak Neo Credentials
+NEXT_PUBLIC_KOTAK_NEO_API_URL=https://api.kotaksecurities.com
+KOTAK_NEO_USER_ID=your_user_id
+KOTAK_NEO_PASSWORD=your_password
+KOTAK_NEO_2FA=your_2fa_code
+KOTAK_NEO_CONSUMER_KEY=your_consumer_key
+KOTAK_NEO_CONSUMER_SECRET=your_consumer_secret
+KOTAK_NEO_REDIRECT_URL=http://localhost:3000/auth/callback
 
-# Broker
-ACTIVE_BROKER=SHOONYA
-SHOONYA_USER_ID=your_user_id
-SHOONYA_API_KEY=your_api_key
-SHOONYA_VENDOR_CODE=your_vendor_code
-SHOONYA_API_SECRET=your_api_secret
+# Risk Management Rules
+MAX_TRADES_PER_DAY=3
+MAX_LOSS_LIMIT=5000
+MAX_LOTS=1
 
 # Supabase
 NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
-
-# WebSocket Server
-NEXT_PUBLIC_WS_SERVER_URL=http://localhost:3001
 ```
 
 ### 4. Database Setup
 
 1. Create a Supabase project
-2. Run the SQL schema from `supabase/schema.sql` in your Supabase SQL editor
+2. Run all SQL schema files from `supabase/` folder in your Supabase SQL editor:
+   - `scrip_master_schema.sql` - Instrument master data
+   - `positions_schema.sql` - Current open positions (NEW - required for position tracking)
+   - `SETUP_TRADING_RULES.sql` - Trading rules configuration
+   - `trades_schema.sql` - Trade history and logging
 3. Update your `.env.local` with Supabase credentials
 
-### 5. WebSocket Server (Optional)
+**Important**: Make sure to run these in order in your Supabase SQL editor:
+1. Go to https://app.supabase.com/project/YOUR_PROJECT_ID/sql/new
+2. Copy & paste each schema file and execute
+3. Verify all tables are created successfully
 
-For real-time market data, you need a separate Node.js server:
-
-```bash
-# Create a new directory for the WebSocket server
-mkdir ws-server
-cd ws-server
-npm init -y
-npm install express socket.io shoonya-api-js
-```
-
-Create `server.js`:
-
-```javascript
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' }
-});
-
-io.on('connection', (socket) => {
-  console.log('Client connected');
-  
-  socket.on('subscribe', ({ symbols }) => {
-    // Implement Shoonya WebSocket subscription
-    console.log('Subscribing to:', symbols);
-  });
-  
-  socket.on('disconnect', () => {
-    console.log('Client disconnected');
-  });
-});
-
-server.listen(3001, () => {
-  console.log('WebSocket server running on port 3001');
-});
-```
-
-### 6. Run Development Server
+### 5. Run Development Server
 
 ```bash
 npm run dev
@@ -165,93 +138,119 @@ Open [http://localhost:3000](http://localhost:3000)
 
 ```
 src/
-├── app/                    # Next.js App Router
-│   ├── page.tsx           # Home page
-│   ├── layout.tsx         # Root layout
-│   └── globals.css        # Global styles
-├── components/            # React components
-│   ├── ui/               # Shadcn/UI components
-│   ├── TradingDashboard.tsx
-│   ├── OrderBook.tsx
-│   ├── PositionBook.tsx
-│   ├── QuickTrade.tsx
-│   ├── StatsPanel.tsx
-│   └── KillSwitch.tsx
+├── app/                          # Next.js App Router
+│   ├── page.tsx                 # Main trading dashboard
+│   ├── debug/                   # Debug pages
+│   └── api/                     # API routes
+├── components/                  # React components
+│   ├── Dashboard.tsx            # Performance metrics
+│   ├── TradingPanel.tsx         # Main trading interface
+│   ├── TradingStatusBanner.tsx  # Trading status with rules
+│   ├── KotakNeoLogin.tsx        # Authentication
+│   ├── trading/
+│   │   ├── Watchlist.tsx       # Instrument selection
+│   │   ├── OrderForm.tsx       # Order placement
+│   │   ├── PositionsTable.tsx  # Open positions
+│   │   └── OrdersTable.tsx     # Order history
+│   ├── OptionsChain.tsx        # Options chain view
+│   └── ui/                      # Shadcn/UI components
 ├── lib/
-│   ├── brokers/          # Broker abstraction layer
-│   │   ├── BaseBroker.ts         # Abstract base class
-│   │   ├── ShoonyaAdapter.ts     # Shoonya implementation
-│   │   └── BrokerFactory.ts      # Factory pattern
-│   ├── risk/             # Risk management
+│   ├── services/               # Business logic
+│   │   ├── KotakTradingService.ts
+│   │   ├── TradingRulesService.ts
+│   │   ├── TradesService.ts
+│   │   ├── PerformanceMetricsService.ts
+│   │   └── ScripSearchService.ts
+│   ├── risk/                   # Risk management
 │   │   └── RiskManager.ts
-│   ├── supabase/         # Database client
-│   │   └── client.ts
-│   └── websocket/        # WebSocket service
-│       └── WebSocketService.ts
-├── store/                # Zustand stores
+│   ├── utils/                  # Utility functions
+│   │   ├── marketHours.ts
+│   │   └── validation.ts
+│   └── hooks/                  # Custom React hooks
+│       └── useKotakTrading.ts
+├── store/                      # State management
 │   └── tradingStore.ts
-└── types/                # TypeScript types
-    ├── broker.types.ts
-    └── risk.types.ts
+└── types/                      # TypeScript types
+    ├── kotak.types.ts
+    ├── trading.types.ts
+    └── common.types.ts
 ```
 
 ## 🎯 How It Works
 
+### Trading Rules
+
+All trades are subject to strict trading rules:
+- **Only NIFTY Options (CE/PE)** - No other instruments allowed
+- **Max 1 lot per order** - Prevents over-leverage
+- **Max 3 trades per day** - Risk control
+- **No concurrent live trades** - One position at a time
+- **Master switch required** - Rule -1 must be enabled
+
 ### Order Flow
 
 ```
-User clicks "Buy" 
+User Authenticates with Kotak Neo
   ↓
-Risk Manager validates order
-  ├─ Check daily trade limit
+User selects NIFTY Option (CE/PE)
+  ↓
+User places order
+  ↓
+Trading Rules Engine validates:
+  ├─ Check rule status (Master switch enabled)
+  ├─ Check daily trade count
+  ├─ Check concurrent positions
   ├─ Check loss limit
-  ├─ Check lot size
-  └─ Check position size
+  └─ Check lot size (max 1)
   ↓
-If valid → Broker Adapter places order
+If valid → Kotak Neo places order
   ↓
-Order logged in database
+Order logged in Supabase
   ↓
-UI updates with new order/position
+Position tracked in real-time
   ↓
-Check if Kill Switch should activate
+P&L calculated and displayed
 ```
 
-### Risk Validation Example
+### Trading Rules Tooltip
 
-```typescript
-const validation = await riskManager.validateOrder(orderRequest);
-
-if (!validation.isValid) {
-  // Block order
-  console.error(validation.errors);
-} else {
-  // Place order
-  await broker.placeOrder(orderRequest);
-}
-```
+A handy tooltip near the "Trading ON/OFF" status shows:
+- ✓ Only NIFTY Options (CE/PE)
+- ✓ Max 1 lot per order
+- ✓ Max 3 trades per day
+- ✓ No concurrent live trades
+- Master switch (Rule -1) must be enabled to trade
 
 ## 🔒 Risk Management Rules
 
-| Rule | Default Value | Description |
-|------|---------------|-------------|
-| Max Trades/Day | 5 | Maximum number of trades allowed per day |
-| Max Loss Limit | ₹5,000 | Maximum loss allowed before trading is blocked |
-| Max Lots | 10 | Maximum lot size per order |
-| Max Position Size | ₹1,00,000 | Maximum position value |
+| Rule | Value | Description |
+|------|-------|-------------|
+| Max Trades/Day | 3 | Maximum number of trades per day |
+| Max Loss Limit | ₹5,000 | Maximum loss before trading disabled |
+| Max Lots | 1 | Maximum lot size per order |
+| Instrument | NIFTY CE/PE | Only NIFTY options allowed |
+| Concurrent Positions | 1 | No concurrent live trades |
+| Master Switch | Rule -1 | Must be enabled to trade |
 
-**Note**: These values can be configured in `.env` or updated via the UI.
+## 📊 Dashboard Features
 
-## 🚨 Kill Switch
+### Performance Metrics
+- **Total Trades**: Number of trades executed
+- **Win Rate**: Percentage of profitable trades
+- **Net P&L**: Current profit/loss
+- **Daily Stats**: Today's performance vs Overall
+- **Daily P&L Calendar**: Month view with daily P&L
 
-The Kill Switch is automatically activated when:
-- Daily loss exceeds the configured limit
-- Manually triggered by the user
+### Position Management
+- Real-time position list with LTP
+- Current P&L per position
+- Quick exit buttons
+- Position quantity and entry price
 
-When activated:
-1. All open positions are closed immediately
-2. New order placement is disabled
-3. User must manually deactivate to resume trading
+### Order Tracking
+- Order history with timestamps
+- Order status (Pending, Filled, Rejected)
+- Order prices and quantities
 
 ## 🧪 Testing
 
@@ -266,34 +265,38 @@ npm run type-check
 npm run lint
 ```
 
+## 🚨 Kill Switch
+
+The Kill Switch is automatically triggered when:
+- Daily loss exceeds the configured limit
+- Manually triggered by the user
+
+When activated:
+1. All open positions are closed immediately
+2. New order placement is disabled
+3. User must manually deactivate to resume trading
+
 ## 📈 Adding a New Broker
 
-1. Create a new adapter in `src/lib/brokers/`:
+1. Create a new service in `src/lib/services/`:
 
 ```typescript
-import { BaseBroker } from './BaseBroker';
-
-export class ZerodhaAdapter extends BaseBroker {
-  async authenticate(): Promise<boolean> {
-    // Implement Zerodha auth
+export class NewBrokerTradingService {
+  async authenticate(credentials: Credentials): Promise<Session> {
+    // Implement broker auth
   }
   
-  async placeOrder(orderRequest: OrderRequest): Promise<Order> {
-    // Implement Zerodha order placement
+  async placeOrder(order: OrderRequest): Promise<Order> {
+    // Implement order placement
   }
   
   // Implement other methods...
 }
 ```
 
-2. Add to `BrokerFactory.ts`:
+2. Update the trading panel to use the new broker service
 
-```typescript
-case BrokerType.ZERODHA:
-  return new ZerodhaAdapter(credentials);
-```
-
-3. Update environment variables
+3. Update environment variables for new broker credentials
 
 ## 🚀 Deployment
 
@@ -303,28 +306,24 @@ case BrokerType.ZERODHA:
 vercel --prod
 ```
 
-### Railway/Render (WebSocket Server)
+### Environment Variables on Vercel
 
-1. Create a new project
-2. Deploy the `ws-server` directory
-3. Update `NEXT_PUBLIC_WS_SERVER_URL` in Vercel environment variables
+1. Go to Project Settings → Environment Variables
+2. Add all variables from `.env.local`
+3. Redeploy
 
 ## 📝 License
 
-MIT
-
-## 🤝 Contributing
-
-Contributions are welcome! Please open an issue or PR.
+Proprietary - All rights reserved
 
 ## ⚠️ Disclaimer
 
-This is a trading platform. Use at your own risk. Always test thoroughly before using real money. The authors are not responsible for any financial losses.
+This is a real money trading platform. Use at your own risk. Always test thoroughly in paper trading mode before using real money. The authors are not responsible for any financial losses. Trading derivatives is high-risk and may result in substantial losses.
 
 ## 📧 Support
 
-For questions or issues, please open a GitHub issue.
+For questions or issues, please contact the development team.
 
 ---
 
-Built with ❤️ using Clean Architecture principles
+Built with ❤️ using Clean Architecture principles & Risk Management Best Practices

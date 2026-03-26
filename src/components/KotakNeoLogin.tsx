@@ -15,7 +15,6 @@ export default function KotakNeoLogin({
   onSuccess?: (session: any) => void;
 }) {
   const [totp, setTotp] = useState('');
-  const [mpin, setMpin] = useState('');
 
   const [currentStep, setCurrentStep] = useState<LoginStep>({
     step: 'totp',
@@ -37,10 +36,19 @@ export default function KotakNeoLogin({
     try {
       setLoading(true);
       
-      // Get credentials from environment or use hardcoded values
-      const consumerKey = 'c63d7961-e935-4bce-8183-c63d9d2342f0';
-      const mobileNumber = '+916375922829';
-      const ucc = 'V2Q1T';
+      // Get credentials from environment
+      const consumerKey = process.env.NEXT_PUBLIC_KOTAK_CONSUMER_KEY || 'c63d7961-e935-4bce-8183-c63d9d2342f0';
+      const mobileNumber = process.env.NEXT_PUBLIC_KOTAK_MOBILE_NUMBER || '+916375922829';
+      const ucc = process.env.NEXT_PUBLIC_KOTAK_UCC || 'V2Q1T';
+      const mpin = process.env.NEXT_PUBLIC_KOTAK_MPIN || '';
+
+      if (!mpin) {
+        setCurrentStep({
+          step: 'error',
+          message: '❌ MPIN not configured in environment',
+        });
+        return;
+      }
 
       const service = new KotakAuthService({
         consumerKey,
@@ -51,11 +59,17 @@ export default function KotakNeoLogin({
       await service.validateTotp(totp.trim());
       setAuthService(service);
 
+      // Auto-validate MPIN without user input
       setCurrentStep({
         step: 'mpin',
-        message: '🔐 Enter your 6-digit MPIN to complete authentication',
+        message: '🔐 Validating MPIN automatically...',
       });
       setTotp('');
+
+      // Automatically submit MPIN after brief delay
+      setTimeout(() => {
+        completeMpinValidation(service, mpin);
+      }, 500);
     } catch (error) {
       setCurrentStep({
         step: 'error',
@@ -66,24 +80,11 @@ export default function KotakNeoLogin({
     }
   };
 
-  const handleMpinSubmit = async () => {
-    if (!mpin.trim() || mpin.length !== 6 || isNaN(Number(mpin))) {
-      setCurrentStep({
-        step: 'error',
-        message: '❌ MPIN must be exactly 6 digits',
-      });
-      return;
-    }
-
-    if (!authService) {
-      return;
-    }
-
+  const completeMpinValidation = async (service: KotakAuthService, mpin: string) => {
     try {
       setLoading(true);
-      const response = await authService.validateMpin(mpin.trim());
-
-      const headers = authService.getAuthHeaders();
+      const response = await service.validateMpin(mpin);
+      const headers = service.getAuthHeaders();
 
       setCurrentStep({
         step: 'success',
@@ -114,7 +115,6 @@ export default function KotakNeoLogin({
       message: '📱 Enter your 6-digit TOTP from authenticator app',
     });
     setTotp('');
-    setMpin('');
     setAuthService(null);
   };
 
@@ -177,44 +177,19 @@ export default function KotakNeoLogin({
             </div>
           )}
 
-          {/* MPIN Input */}
+          {/* MPIN Auto-Validation */}
           {currentStep.step === 'mpin' && (
-            <div className="space-y-4">
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4 flex items-start gap-3">
-                <Lock className="text-green-600 flex-shrink-0 mt-0.5" size={20} />
-                <div className="text-sm">
-                  <p className="font-semibold text-green-900">Step 2: MPIN Validation</p>
-                  <p className="text-green-700 text-xs mt-1">
-                    Enter your MPIN to get full trading access
-                  </p>
-                </div>
+            <div className="space-y-4 text-center">
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+                <Lock className="text-amber-600 flex-shrink-0 mt-0.5 mx-auto" size={24} />
               </div>
-
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  MPIN (6 digits)
-                </label>
-                <input
-                  type="password"
-                  inputMode="numeric"
-                  value={mpin}
-                  onChange={(e) => setMpin(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="••••••"
-                  maxLength={6}
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center font-mono text-3xl tracking-widest"
-                  disabled={loading}
-                  autoFocus
-                />
+                <p className="font-semibold text-amber-900 text-lg">Validating MPIN</p>
+                <p className="text-amber-700 text-xs mt-1">Please wait...</p>
               </div>
-
-              <button
-                onClick={handleMpinSubmit}
-                disabled={loading || mpin.length !== 6}
-                className="w-full px-4 py-2.5 bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {loading && <Loader size={18} className="animate-spin" />}
-                {loading ? 'Validating...' : 'Validate MPIN'}
-              </button>
+              <div className="flex justify-center">
+                <Loader size={32} className="animate-spin text-amber-600" />
+              </div>
             </div>
           )}
 

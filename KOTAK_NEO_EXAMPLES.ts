@@ -16,7 +16,6 @@ export class KotakNeoTradingExample {
    */
   async connect() {
     try {
-      console.log('🔌 Connecting to Kotak Neo...');
       const authenticated = await this.broker.authenticate();
 
       if (!authenticated) {
@@ -36,7 +35,6 @@ export class KotakNeoTradingExample {
    */
   async placeBuyOrder(symbol: string, quantity: number, price: number) {
     try {
-      console.log(`📝 Placing BUY order for ${symbol}...`);
 
       const order = await this.broker.placeOrder({
         symbol: symbol,
@@ -47,12 +45,6 @@ export class KotakNeoTradingExample {
         orderType: OrderType.LIMIT,
         productType: ProductType.INTRADAY,
       });
-
-      console.log(`✅ Order placed successfully: ${order.orderId}`);
-      console.log(`   Symbol: ${order.symbol}`);
-      console.log(`   Quantity: ${order.quantity}`);
-      console.log(`   Price: ${order.price}`);
-      console.log(`   Status: ${order.status}`);
 
       return order;
     } catch (error) {
@@ -66,16 +58,13 @@ export class KotakNeoTradingExample {
    */
   async getPositions() {
     try {
-      console.log('📊 Fetching positions...');
 
       const positions = await this.broker.getPositions();
 
       if (positions.length === 0) {
-        console.log('No open positions');
         return positions;
       }
 
-      console.log(`✅ Found ${positions.length} position(s):`);
       positions.forEach((pos, index) => {
         console.log(`
   ${index + 1}. ${pos.symbol}

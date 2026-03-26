@@ -95,19 +95,19 @@ export default function ResyncButton() {
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {/* Resync Button */}
       <button
         onClick={handleResync}
         disabled={status.isLoading}
-        className={`w-full px-4 py-2.5 rounded-lg font-medium transition flex items-center justify-center gap-2 ${
+        className={`px-3 py-1.5 rounded text-sm font-medium transition inline-flex items-center gap-1.5 ${
           status.isLoading
             ? 'bg-blue-100 text-blue-700 cursor-not-allowed'
-            : 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800'
+            : 'bg-blue-500 text-white hover:bg-blue-600 active:bg-blue-700'
         }`}
       >
-        <RefreshCw size={18} className={status.isLoading ? 'animate-spin' : ''} />
-        {status.isLoading ? 'Resyncing...' : 'Resync Scrip Data'}
+        <RefreshCw size={14} className={status.isLoading ? 'animate-spin' : ''} />
+        {status.isLoading ? 'Resyncing...' : 'Resync Data'}
       </button>
 
       {/* Result Message */}

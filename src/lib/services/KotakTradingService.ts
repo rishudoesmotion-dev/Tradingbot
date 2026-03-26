@@ -2,6 +2,7 @@
 import { BrokerFactory } from '@/lib/brokers/BrokerFactory';
 import { OrderSide, OrderType, ProductType } from '@/types/broker.types';
 import { BaseBroker } from '@/lib/brokers/BaseBroker';
+import { quotesService } from '@/lib/services/QuotesService';
 
 export interface TradeConfig {
   symbol: string;
@@ -39,6 +40,16 @@ export class KotakTradingService {
     try {
       this.sessionInfo = sessionInfo;
       console.log('✅ Kotak Neo session initialized');
+
+      // Wire quotesService so it can fetch live market data via proxy
+      quotesService.setSession({
+        tradingToken: sessionInfo.tradingToken,
+        tradingSid: sessionInfo.tradingSid,
+        baseUrl: sessionInfo.baseUrl,
+        consumerKey: this.consumerKey,
+      });
+      console.log('✅ QuotesService session configured for live prices');
+
       this.isAuthenticated = true;
       return true;
     } catch (error) {
@@ -102,10 +113,20 @@ export class KotakTradingService {
       const response = await fetch(`/api/kotak/trade?${queryParams.toString()}`);
       const data = await response.json();
 
-      if (!response.ok) {
-        throw new Error(data.error || `API call failed: ${response.statusText}`);
+      // 401 = session expired — throw a recognisable error so callers can force re-login
+      if (response.status === 401 && data?.error === 'SESSION_EXPIRED') {
+        const err = new Error('SESSION_EXPIRED');
+        (err as any).isSessionExpired = true;
+        throw err;
       }
 
+      if (!response.ok) {
+        const errMsg = data?.error || `API call failed: ${response.statusText}`;
+        console.error(`[KotakTradingService] ❌ ${action} HTTP error (${response.status}):`, data);
+        throw new Error(errMsg);
+      }
+
+      console.log(`[KotakTradingService] 📥 ${action} proxy response:`, data);
       return data.data;
     } else {
       // POST
@@ -319,32 +340,60 @@ export class KotakTradingService {
    */
   async getPositions() {
     if (!this.isReady()) {
+      console.log('[KotakTradingService] ❌ getPositions: Service not ready');
       return { success: false, positions: [], message: 'Service not initialized' };
     }
 
     try {
       // Use API proxy if session-based
       if (this.sessionInfo) {
+        console.log('[KotakTradingService] 📤 getPositions: Fetching via API...');
         const result = await this.callTradingAPI('GET', 'getPositions');
-        const positions = result?.positions || [];
+        console.log('[KotakTradingService] 📥 getPositions raw result:', JSON.stringify(result));
+
+        // Kotak response structure can be:
+        // 1. { stat: "Ok", stCode: 200, data: [...positions] }   ← most common
+        // 2. [...positions]                                        ← direct array
+        // 3. { positions: [...] }                                  ← wrapped
+        let positions: any[] = [];
+        if (result?.data && Array.isArray(result.data)) {
+          positions = result.data;
+        } else if (Array.isArray(result)) {
+          positions = result;
+        } else if (result?.positions && Array.isArray(result.positions)) {
+          positions = result.positions;
+        }
+
+        console.log(`[KotakTradingService] ✅ getPositions: Extracted ${positions.length} positions`, positions);
+
         return {
           success: true,
           positions,
           count: positions.length,
-          totalPnL: positions.reduce((sum: number, p: any) => sum + (p.pnl || 0), 0),
+          totalPnL: positions.reduce((sum: number, p: any) => {
+            const buy = parseFloat(p.buyAmt || '0');
+            const sell = parseFloat(p.sellAmt || '0');
+            const qty = parseInt(p.qty || '0', 10);
+            const ltp = parseFloat(p.ltp || p.ltP || '0');
+            // unrealised P&L = sell - buy + (net qty * ltp)
+            return sum + (sell - buy + qty * ltp);
+          }, 0),
         };
       }
 
       // Legacy: use broker directly
+      console.log('[KotakTradingService] 📤 getPositions: Using broker directly...');
       const positions = await this.broker!.getPositions();
-      
+      console.log('[KotakTradingService] 📥 getPositions broker result:', positions);
+
       return {
         success: true,
         positions,
         count: positions.length,
-        totalPnL: positions.reduce((sum, p) => sum + p.pnl, 0),
+        totalPnL: positions.reduce((sum, p) => sum + (p.pnl || 0), 0),
       };
     } catch (error) {
+      console.error('[KotakTradingService] ❌ getPositions error:', error);
       return {
         success: false,
         positions: [],
@@ -391,33 +440,23 @@ export class KotakTradingService {
   }
 
   /**
-   * Get LTP for a symbol
+   * Get LTP for a symbol using the Quotes API (proxied, session-aware)
    */
-  async getLTP(symbol: string) {
+  async getLTP(symbol: string, exchangeSegment: string = 'nse_cm') {
     if (!this.isReady()) {
       return { success: false, ltp: 0, message: 'Service not initialized' };
     }
 
     try {
-      // Use API proxy if session-based
-      if (this.sessionInfo) {
-        const result = await this.callTradingAPI('GET', 'getLTP', { symbol });
-        return {
-          success: true,
-          symbol,
-          ltp: result?.ltp || 0,
-        };
-      }
+      console.log(`[KotakTradingService] 📤 Fetching LTP for ${symbol} (${exchangeSegment})`);
 
-      // Legacy: use broker directly
-      const ltp = await this.broker!.getLTP(symbol, this.getExchange(symbol));
-      
-      return {
-        success: true,
-        symbol,
-        ltp,
-      };
+      const ltp = await quotesService.getLTP(exchangeSegment, symbol);
+
+      console.log(`[KotakTradingService] ✅ LTP fetched: ${symbol} = ₹${ltp}`);
+
+      return { success: ltp > 0, symbol, ltp };
     } catch (error) {
+      console.error(`[KotakTradingService] ❌ Failed to fetch LTP for ${symbol}:`, error);
       return {
         success: false,
         symbol,
@@ -428,27 +467,84 @@ export class KotakTradingService {
   }
 
   /**
+   * Batch LTP fetch for multiple positions (single API call – efficient)
+   * Returns a map of symbol → ltp
+   */
+  async getBatchLTP(
+    queries: Array<{ segment: string; symbol: string }>
+  ): Promise<Map<string, number>> {
+    return quotesService.getBatchLTP(queries);
+  }
+
+  /**
+   * Get full quote data (LTP, OHLC, depth) for a symbol
+   */
+  async getQuote(symbol: string, exchangeSegment: string = 'nse_cm') {
+    try {
+      console.log(`[KotakTradingService] 📤 Fetching quote for ${symbol} (${exchangeSegment})`);
+      
+      const quote = await quotesService.getFullQuote(exchangeSegment, symbol);
+      
+      if (!quote) {
+        return { success: false, quote: null, message: 'Quote not found' };
+      }
+      
+      console.log(`[KotakTradingService] ✅ Quote fetched:`, quote);
+      
+      return {
+        success: true,
+        quote,
+      };
+    } catch (error) {
+      console.error(`[KotakTradingService] ❌ Failed to fetch quote for ${symbol}:`, error);
+      return {
+        success: false,
+        quote: null,
+        message: `❌ Failed to fetch quote: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+  }
+
+  /**
    * Get all orders for the day
    */
   async getOrders() {
     if (!this.isReady()) {
+      console.log('[KotakTradingService] ❌ getOrders: Service not ready');
       return { success: false, orders: [], message: 'Service not initialized' };
     }
 
     try {
       // Use API proxy if session-based
       if (this.sessionInfo) {
+        console.log('[KotakTradingService] 📤 getOrders: Fetching via API...');
         const result = await this.callTradingAPI('GET', 'getOrders');
-        const orders = result?.orders || [];
+        console.log('[KotakTradingService] 📥 getOrders raw result:', JSON.stringify(result));
+        
+        // callTradingAPI returns data.data from route, which is the full Kotak response:
+        // { stat: "Ok", stCode: 200, data: [...orders] }
+        let orders: any[] = [];
+        if (result?.data && Array.isArray(result.data)) {
+          orders = result.data;
+        } else if (Array.isArray(result)) {
+          orders = result;
+        } else if (result?.orders && Array.isArray(result.orders)) {
+          orders = result.orders;
+        }
+        
+        console.log(`[KotakTradingService] ✅ getOrders: Extracted ${orders.length} orders`, orders);
+        
         return {
           success: true,
-          orders,
+          orders: orders,
           count: orders.length,
         };
       }
 
       // Legacy: use broker directly
+      console.log('[KotakTradingService] 📤 getOrders: Using broker directly...');
       const orders = await this.broker!.getOrders();
+      console.log('[KotakTradingService] 📥 getOrders broker result:', orders);
       
       return {
         success: true,
@@ -456,6 +552,7 @@ export class KotakTradingService {
         count: orders.length,
       };
     } catch (error) {
+      console.error('[KotakTradingService] ❌ getOrders error:', error);
       return {
         success: false,
         orders: [],
@@ -473,6 +570,9 @@ export class KotakTradingService {
       this.isAuthenticated = false;
       console.log('✅ Disconnected from Kotak Neo');
     }
+    quotesService.clearSession();
+    this.sessionInfo = null;
+    this.isAuthenticated = false;
   }
 
   /**

@@ -1,18 +1,37 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useKotakTrading } from '@/hooks/useKotakTrading';
 import ScripSearchBox from './ScripSearchBox';
 import { ScripResult } from '@/lib/services/ScripSearchService';
 import { AlertCircle, Loader, TrendingUp, TrendingDown, Zap } from 'lucide-react';
 
-export default function QuickTrade() {
+interface QuickTradeProps {
+  preselected?: { scrip: ScripResult; side: 'BUY' | 'SELL' } | null;
+}
+
+export default function QuickTrade({ preselected }: QuickTradeProps) {
   const trading = useKotakTrading();
   const [symbol, setSymbol] = useState('');
   const [quantity, setQuantity] = useState(1);
   const [price, setPrice] = useState(0);
   const [ltp, setLtp] = useState(0);
   const [selectedScrip, setSelectedScrip] = useState<ScripResult | null>(null);
+  const [selectedSide, setSelectedSide] = useState<'BUY' | 'SELL' | null>(null);
+
+  // Handle preselected scrip from OptionsChain
+  useEffect(() => {
+    if (preselected) {
+      setSelectedScrip(preselected.scrip);
+      setSymbol(preselected.scrip.p_symbol);
+      setSelectedSide(preselected.side);
+      console.log('📊 Pre-selected scrip:', {
+        symbol: preselected.scrip.p_symbol,
+        side: preselected.side,
+        trdSymbol: preselected.scrip.p_trd_symbol,
+      });
+    }
+  }, [preselected]);
 
   const handleSelectScrip = (scrip: ScripResult) => {
     setSelectedScrip(scrip);
@@ -149,16 +168,6 @@ export default function QuickTrade() {
               Sell
             </button>
           </div>
-
-          {/* Kill Switch */}
-          <button
-            onClick={trading.killSwitch}
-            disabled={trading.isLoading || trading.positions.length === 0}
-            className="w-full px-4 py-2 bg-red-900 hover:bg-red-950 text-white rounded-md text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-50 transition"
-          >
-            <Zap size={16} />
-            Kill Switch - Exit All
-          </button>
         </div>
       )}
 

@@ -357,6 +357,83 @@ class TradesService {
       return null;
     }
   }
+
+
+  // ─────────────────────────────────────────────────────────────────────────────
+// ADD THESE TWO METHODS inside the TradesService class, just before the
+// closing brace `}` of the class (before the singleton block at the bottom).
+// ─────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch the current trading_enabled row.
+   * Returns { isEnabled, disabledReason } or null on error.
+   */
+  async getTradingEnabled(): Promise<{ isEnabled: boolean; disabledReason: string | null } | null> {
+    try {
+      const { data, error } = await supabase
+        .from('trading_enabled')
+        .select('is_enabled, disabled_reason')
+        .limit(1)
+        .single();
+
+      if (error) {
+        console.error('[TradesService] Error fetching trading_enabled:', error);
+        // Fail-safe: if we can't read the row, treat as DISABLED to be safe
+        return { isEnabled: false, disabledReason: 'Could not verify trading status' };
+      }
+
+      return {
+        isEnabled:      data.is_enabled,
+        disabledReason: data.disabled_reason ?? null,
+      };
+    } catch (err) {
+      console.error('[TradesService] Exception fetching trading_enabled:', err);
+      return { isEnabled: false, disabledReason: 'Could not verify trading status' };
+    }
+  }
+
+  /**
+   * Set is_enabled = false on the trading_enabled row.
+   * Can only be reversed from Supabase directly.
+   *
+   * @param reason  Optional human-readable reason stored in disabled_reason column.
+   * @returns       { success, message }
+   */
+  async deactivateTrading(reason: string = 'Manually disabled from dashboard'): Promise<{ success: boolean; message: string }> {
+    try {
+      // Fetch the single row's id first (we don't know it client-side)
+      const { data: row, error: fetchError } = await supabase
+        .from('trading_enabled')
+        .select('id')
+        .limit(1)
+        .single();
+
+      if (fetchError || !row) {
+        console.error('[TradesService] Could not find trading_enabled row:', fetchError);
+        return { success: false, message: 'Could not find trading status record in database.' };
+      }
+
+      const { error: updateError } = await supabase
+        .from('trading_enabled')
+        .update({
+          is_enabled:      false,
+          disabled_reason: reason,
+        })
+        .eq('id', row.id);
+
+      if (updateError) {
+        console.error('[TradesService] Error deactivating trading:', updateError);
+        return { success: false, message: `Failed to deactivate: ${updateError.message}` };
+      }
+
+      console.info('[TradesService] Trading deactivated. Reason:', reason);
+      return { success: true, message: 'Trading has been deactivated for today.' };
+    } catch (err) {
+      console.error('[TradesService] Exception deactivating trading:', err);
+      return { success: false, message: 'Unexpected error while deactivating trading.' };
+    }
+  }
+
 }
 
 // Singleton instance

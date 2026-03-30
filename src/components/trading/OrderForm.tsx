@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { ScripResult } from '@/lib/services/ScripSearchService';
-import { TrendingUp, TrendingDown, Loader2, CheckCircle, AlertCircle, X, Zap } from 'lucide-react';
+import { TrendingUp, TrendingDown, Loader2, CheckCircle, AlertCircle, X, ShieldOff } from 'lucide-react';
 
 interface OrderFormProps {
   selectedScrip: ScripResult | null;
@@ -10,6 +10,7 @@ interface OrderFormProps {
   isConnected: boolean;
   isLoading: boolean;
   currentLTP?: number;
+  isTradingEnabled: boolean;           // ← NEW prop
   onPlaceOrder: (order: OrderPayload) => Promise<{ success: boolean; message: string }>;
   onClear: () => void;
 }
@@ -19,7 +20,7 @@ export interface OrderPayload {
   trdSymbol: string;
   exchSeg: string;
   side: 'BUY' | 'SELL';
-  orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SL-M';
+  orderType: 'L' | 'SL';
   productType: 'MIS' | 'CNC' | 'NRML';
   quantity: number;
   price: number;
@@ -27,16 +28,36 @@ export interface OrderPayload {
   lotSize: number;
 }
 
-// ── Strike extractor ──────────────────────────────────────────────────────────
-// Handles both Kotak p_trd_symbol formats for NIFTY 50:
-//   Weekly : NIFTY26324 23300 CE  → NIFTY + 5 digits + strike + CE/PE
-//   Monthly: NIFTY26MAR24 23300 CE → NIFTY + 2d + 3letters + 2d + strike + CE/PE
-// Returns [strikeNumber, optionType] or null.
+type UIOrderType = 'LIMIT' | 'SL';
+
+const ORDER_TYPE_MAP: Record<UIOrderType, 'L' | 'SL'> = {
+  LIMIT: 'L',
+  SL:    'SL',
+};
+
 function extractStrike(trdSymbol: string): [number, string] | null {
-  const sym = (trdSymbol || '').toUpperCase();
-  const m   = sym.match(/^NIFTY(?:\d{5}|\d{2}[A-Z]{3}\d{2})(\d+)(CE|PE)$/);
-  if (!m) return null;
-  return [parseInt(m[1], 10), m[2]];
+  const sym = (trdSymbol || '').replace(/\s+/g, '').toUpperCase();
+  let m = sym.match(/^NIFTY\d{2}[A-Z]{3}(\d{4,6})(CE|PE)$/);
+  if (m) return [parseInt(m[1], 10), m[2]];
+  m = sym.match(/^NIFTY\d{5}(\d{4,6})(CE|PE)$/);
+  if (m) return [parseInt(m[1], 10), m[2]];
+  return null;
+}
+
+function getScripLabelFromScrip(scrip: ScripResult): string {
+  const fromTrd = extractStrike(scrip.p_trd_symbol || '');
+  if (fromTrd) {
+    const [strike, optType] = fromTrd;
+    return `NIFTY ${strike.toLocaleString('en-IN')} ${optType}`;
+  }
+  if (scrip.p_symbol) {
+    const fromSym = extractStrike(scrip.p_symbol);
+    if (fromSym) {
+      const [strike, optType] = fromSym;
+      return `NIFTY ${strike.toLocaleString('en-IN')} ${optType}`;
+    }
+  }
+  return scrip.p_instr_name || scrip.p_trd_symbol || scrip.p_symbol || '';
 }
 
 export default function OrderForm({
@@ -45,11 +66,12 @@ export default function OrderForm({
   isConnected,
   isLoading,
   currentLTP,
+  isTradingEnabled,   // ← destructure new prop
   onPlaceOrder,
   onClear,
 }: OrderFormProps) {
   const [side, setSide]               = useState<'BUY' | 'SELL'>(defaultSide);
-  const [orderType, setOrderType]     = useState<'MARKET' | 'LIMIT' | 'SL' | 'SL-M'>('MARKET');
+  const [orderType, setOrderType]     = useState<UIOrderType>('LIMIT');
   const [productType, setProductType] = useState<'MIS' | 'CNC' | 'NRML'>('MIS');
   const [lots, setLots]               = useState(1);
   const [price, setPrice]             = useState(0);
@@ -58,56 +80,48 @@ export default function OrderForm({
   const [result, setResult]           = useState<{ success: boolean; message: string } | null>(null);
   const [submitting, setSubmitting]   = useState(false);
 
-  // Flash direction when LTP ticks
-  const [ltpFlash, setLtpFlash]     = useState<'up' | 'down' | null>(null);
-  const prevLTPRef                   = useRef<number | undefined>(undefined);
-  const flashTimerRef                = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [displayedLTP, setDisplayedLTP]   = useState<number>(0);
+  const [ltpFlash, setLtpFlash]           = useState<'up' | 'down' | null>(null);
+  const prevLTPRef                         = useRef<number>(0);
+  const flashTimerRef                      = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Meaningful LTP: defined and > 0
-  const ltpReady = currentLTP !== undefined && currentLTP > 0;
-  const ltp      = ltpReady ? currentLTP! : 0;
-
-  // Flash on every LTP tick
   useEffect(() => {
-    if (!ltpReady) return;
-    if (prevLTPRef.current !== undefined && currentLTP !== prevLTPRef.current) {
-      const dir = currentLTP! > prevLTPRef.current ? 'up' : 'down';
+    if (!currentLTP || currentLTP <= 0) return;
+    if (prevLTPRef.current > 0 && currentLTP !== prevLTPRef.current) {
+      const dir = currentLTP > prevLTPRef.current ? 'up' : 'down';
       setLtpFlash(dir);
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
       flashTimerRef.current = setTimeout(() => setLtpFlash(null), 700);
     }
     prevLTPRef.current = currentLTP;
+    setDisplayedLTP(currentLTP);
     return () => { if (flashTimerRef.current) clearTimeout(flashTimerRef.current); };
-  }, [currentLTP, ltpReady]);
+  }, [currentLTP]);
 
-  // Sync side from parent B/S click
-  useEffect(() => { setSide(defaultSide); }, [defaultSide, selectedScrip]);
-
-  // Full reset when instrument changes
   useEffect(() => {
+    setDisplayedLTP(0);
+    prevLTPRef.current = 0;
+    setLtpFlash(null);
     setLots(1);
     setPrice(0);
     setTriggerPrice(0);
-    setOrderType('MARKET');
+    setOrderType('LIMIT');
     setResult(null);
-    prevLTPRef.current = undefined;
-    setLtpFlash(null);
   }, [selectedScrip?.p_trd_symbol]);
 
-  const lotSize       = selectedScrip?.l_lot_size || 1;
-  const totalQty      = lots * lotSize;
-  const isBuy         = side === 'BUY';
-  const isFnO         = ['nse_fo', 'bse_fo', 'cde_fo'].includes(
-    selectedScrip?.segment || selectedScrip?.p_exch_seg || ''
-  );
+  useEffect(() => { setSide(defaultSide); }, [defaultSide, selectedScrip]);
+
+  const ltpReady       = displayedLTP > 0;
+  const ltp            = displayedLTP;
+  const lotSize        = selectedScrip?.l_lot_size || 1;
+  const totalQty       = lots * lotSize;
+  const isBuy          = side === 'BUY';
   const estimatedValue = ltpReady ? ltp * totalQty : null;
 
-  const handleOrderTypeChange = (t: typeof orderType) => {
+  const handleOrderTypeChange = (t: UIOrderType) => {
     setOrderType(t);
-    if ((t === 'LIMIT' || t === 'SL') && price === 0 && ltpReady)
-      setPrice(parseFloat(ltp.toFixed(2)));
-    if ((t === 'SL' || t === 'SL-M') && triggerPrice === 0 && ltpReady)
-      setTriggerPrice(parseFloat(ltp.toFixed(2)));
+    if (price === 0 && ltpReady)         setPrice(parseFloat(ltp.toFixed(2)));
+    if (t === 'SL' && triggerPrice === 0 && ltpReady) setTriggerPrice(parseFloat(ltp.toFixed(2)));
   };
 
   const handleConfirm = async () => {
@@ -118,10 +132,12 @@ export default function OrderForm({
       symbol:       selectedScrip.p_symbol,
       trdSymbol:    selectedScrip.p_trd_symbol,
       exchSeg:      selectedScrip.p_exch_seg,
-      side, orderType, productType,
+      side,
+      orderType:    ORDER_TYPE_MAP[orderType],
+      productType,
       quantity:     totalQty,
-      price:        orderType === 'MARKET' || orderType === 'SL-M' ? 0 : price,
-      triggerPrice: orderType === 'SL'     || orderType === 'SL-M' ? triggerPrice : 0,
+      price,
+      triggerPrice: orderType === 'SL' ? triggerPrice : 0,
       lotSize,
     };
     try {
@@ -134,35 +150,19 @@ export default function OrderForm({
     }
   };
 
-  // ── Label helpers ──────────────────────────────────────────────────────────
-
-  const getScripLabel = () => {
-    if (!selectedScrip) return '';
-    // Use format-aware extractor — handles both weekly (NIFTY26324STRIKECE)
-    // and monthly (NIFTY26MAR24STRIKECE) Kotak p_trd_symbol formats
-    const parsed = extractStrike(selectedScrip.p_trd_symbol || '');
-    if (parsed) {
-      const [strike, optType] = parsed;
-      return `NIFTY ${strike.toLocaleString('en-IN')} ${optType}`;
-    }
-    return selectedScrip.p_instr_name || selectedScrip.p_trd_symbol || '';
-  };
+  const getScripLabel = () => selectedScrip ? getScripLabelFromScrip(selectedScrip) : '';
 
   const getExpiryLabel = () => {
     if (!selectedScrip?.l_expiry_date) return null;
     const M = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-    // l_expiry_date is already the corrected timestamp (raw CSV + 315511200 applied at sync)
     const d = new Date((selectedScrip.l_expiry_date as number) * 1000);
     return `${String(d.getUTCDate()).padStart(2,'0')} ${M[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
   };
 
-  const ltpTextColor = ltpFlash === 'up'
-    ? '#16a34a'
-    : ltpFlash === 'down'
-    ? '#dc2626'
-    : '#111827';
+  const ltpTextColor = ltpFlash === 'up' ? '#16a34a' : ltpFlash === 'down' ? '#dc2626' : '#111827';
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  // ── Derived: is placing an order currently allowed? ────────────────────────
+  const canPlaceOrder = isConnected && isTradingEnabled;
 
   return (
     <div className="flex flex-col h-full bg-white text-gray-900">
@@ -171,7 +171,6 @@ export default function OrderForm({
       <div className="px-3 pt-3 pb-3 border-b border-gray-100">
         {selectedScrip ? (
           <>
-            {/* Name row */}
             <div className="flex items-start justify-between gap-2 mb-1">
               <div className="flex items-center gap-2 min-w-0 flex-1">
                 <span className="font-bold text-gray-900 text-sm truncate">{getScripLabel()}</span>
@@ -184,20 +183,16 @@ export default function OrderForm({
               </button>
             </div>
 
-            {/* Expiry / lot meta */}
             <div className="flex gap-3 text-xs text-gray-400 mb-3">
               {getExpiryLabel() && <span>{getExpiryLabel()}</span>}
               <span>Lot: <b className="text-gray-500">{lotSize}</b></span>
             </div>
 
-            {/* ── Live LTP card ── */}
             <div className="rounded-xl bg-gradient-to-br from-slate-50 to-white border border-slate-200 px-3 py-2.5">
               <div className="flex items-center justify-between">
-                {/* Left: label + price */}
                 <div>
                   <div className="flex items-center gap-1.5 mb-0.5">
                     <span className="text-xs font-bold tracking-widest text-slate-400 uppercase">LTP</span>
-                    {/* Live pulse dot */}
                     <span
                       className="w-1.5 h-1.5 rounded-full flex-shrink-0"
                       style={{
@@ -214,7 +209,6 @@ export default function OrderForm({
                       }
                     `}</style>
                   </div>
-
                   {ltpReady ? (
                     <span
                       className="text-2xl font-bold tabular-nums transition-colors duration-500"
@@ -223,13 +217,9 @@ export default function OrderForm({
                       ₹{ltp.toFixed(2)}
                     </span>
                   ) : (
-                    <span className="text-xl font-bold text-gray-200 animate-pulse select-none">
-                      ₹ — — —
-                    </span>
+                    <span className="text-xl font-bold text-gray-200 animate-pulse select-none">₹ — — —</span>
                   )}
                 </div>
-
-                {/* Right: est. value */}
                 {estimatedValue && (
                   <div className="text-right">
                     <div className="text-xs text-gray-400 mb-0.5">Est. Value</div>
@@ -268,8 +258,8 @@ export default function OrderForm({
           {/* ── Order Type ── */}
           <div>
             <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1.5">Type</label>
-            <div className="grid grid-cols-4 gap-1">
-              {(['MARKET', 'LIMIT', 'SL', 'SL-M'] as const).map(t => (
+            <div className="grid grid-cols-2 gap-1">
+              {(['LIMIT', 'SL'] as const).map(t => (
                 <button key={t} onClick={() => handleOrderTypeChange(t)}
                   className={`py-1.5 text-xs font-semibold rounded-md border transition-all ${
                     orderType === t
@@ -324,26 +314,24 @@ export default function OrderForm({
             </div>
           </div>
 
-          {/* ── Limit price ── */}
-          {(orderType === 'LIMIT' || orderType === 'SL') && (
-            <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Price (₹)</label>
-                {ltpReady && (
-                  <button onClick={() => setPrice(parseFloat(ltp.toFixed(2)))}
-                    className="text-xs text-blue-500 font-semibold hover:text-blue-700 transition">
-                    Use LTP ↗
-                  </button>
-                )}
-              </div>
-              <input type="number" value={price || ''} step="0.05" min="0" placeholder="0.00"
-                onChange={e => setPrice(parseFloat(e.target.value) || 0)}
-                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 tabular-nums" />
+          {/* ── Price ── */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Price (₹)</label>
+              {ltpReady && (
+                <button onClick={() => setPrice(parseFloat(ltp.toFixed(2)))}
+                  className="text-xs text-blue-500 font-semibold hover:text-blue-700 transition">
+                  Use LTP ↗
+                </button>
+              )}
             </div>
-          )}
+            <input type="number" value={price || ''} step="0.05" min="0" placeholder="0.00"
+              onChange={e => setPrice(parseFloat(e.target.value) || 0)}
+              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 tabular-nums" />
+          </div>
 
-          {/* ── Trigger price ── */}
-          {(orderType === 'SL' || orderType === 'SL-M') && (
+          {/* ── Trigger price (SL only) ── */}
+          {orderType === 'SL' && (
             <div>
               <div className="flex items-center justify-between mb-1.5">
                 <label className="text-xs font-bold text-gray-400 uppercase tracking-widest">Trigger (₹)</label>
@@ -360,14 +348,6 @@ export default function OrderForm({
             </div>
           )}
 
-          {/* ── F&O market warning ── */}
-          {orderType === 'MARKET' && isFnO && (
-            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-              <Zap size={11} className="text-amber-500 flex-shrink-0 mt-0.5" />
-              <span className="text-xs text-amber-700">Market orders on F&O may execute at wide spreads. Consider LIMIT.</span>
-            </div>
-          )}
-
           {/* ── Order result ── */}
           {result && (
             <div className={`flex items-start gap-2 rounded-lg px-3 py-2 text-xs border ${
@@ -380,13 +360,30 @@ export default function OrderForm({
             </div>
           )}
 
-          {/* ── Place Order button ── */}
+          {/* ── Place Order button area ── */}
           <div className="mt-auto pt-1">
-            {!isConnected ? (
+            {/* Case 1: Not connected to broker */}
+            {!isConnected && (
               <div className="text-center text-xs text-gray-400 py-3 border border-dashed border-gray-200 rounded-xl">
                 Connect to place orders
               </div>
-            ) : (
+            )}
+
+            {/* Case 2: Connected but trading is DISABLED */}
+            {isConnected && !isTradingEnabled && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 flex flex-col items-center gap-1.5 text-center">
+                <div className="flex items-center gap-1.5 text-red-600">
+                  <ShieldOff size={15} />
+                  <span className="text-xs font-bold">Trading Deactivated</span>
+                </div>
+                <p className="text-xs text-red-500 leading-relaxed">
+                  Order placement is disabled. Re-enable in Supabase to resume trading.
+                </p>
+              </div>
+            )}
+
+            {/* Case 3: Connected and trading is ENABLED — normal button */}
+            {canPlaceOrder && (
               <button
                 onClick={() => setShowConfirm(true)}
                 disabled={isLoading}
@@ -427,10 +424,10 @@ export default function OrderForm({
                 ['Quantity',  `${totalQty} (${lots} lot${lots > 1 ? 's' : ''})`],
                 ['Type',      orderType],
                 ['Product',   productType],
-                ...(orderType !== 'MARKET' && orderType !== 'SL-M' ? [['Price', `₹${price}`]] : []),
-                ...(orderType === 'SL' || orderType === 'SL-M'     ? [['Trigger', `₹${triggerPrice}`]] : []),
-                ...(ltpReady        ? [['LTP',       `₹${ltp.toFixed(2)}`]] : []),
-                ...(estimatedValue  ? [['Est. Value', `≈ ₹${estimatedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`]] : []),
+                ['Price',     `₹${price}`],
+                ...(orderType === 'SL' ? [['Trigger', `₹${triggerPrice}`]] : []),
+                ...(ltpReady       ? [['LTP',       `₹${ltp.toFixed(2)}`]] : []),
+                ...(estimatedValue ? [['Est. Value', `≈ ₹${estimatedValue.toLocaleString('en-IN', { maximumFractionDigits: 0 })}`]] : []),
               ].map(([label, value]) => (
                 <div key={label} className="flex justify-between items-center py-2 text-sm">
                   <span className="text-gray-400">{label}</span>

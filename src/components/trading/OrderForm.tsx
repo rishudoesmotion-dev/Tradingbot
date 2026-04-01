@@ -20,7 +20,7 @@ export interface OrderPayload {
   trdSymbol: string;
   exchSeg: string;
   side: 'BUY' | 'SELL';
-  orderType: 'L' | 'SL';
+  orderType: "L" | "MKT" | "SL" | "SL-M";
   productType: 'MIS' | 'CNC' | 'NRML';
   quantity: number;
   price: number;

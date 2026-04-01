@@ -1,866 +1,888 @@
-'use client';
+"use client";
 
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { quotesService } from '@/lib/services/QuotesService';
-import { ScripResult } from '@/lib/services/ScripSearchService';
-import { createClient } from '@supabase/supabase-js';
-import { RefreshCw, Star } from 'lucide-react';
+import { useState, useEffect, useCallback } from "react";
+import { useKotakTrading } from "@/hooks/useKotakTrading";
+import { kotakTradingService } from "@/lib/services/KotakTradingService";
+import { getDynamicPollingService } from "@/lib/services/DynamicPollingService";
+import { tradingRulesService } from "@/lib/services/TradingRulesService";
+import { ScripResult } from "@/lib/services/ScripSearchService";
+import { isMarketOpen } from "@/lib/utils/marketHours";
+import { RiskManager } from "@/lib/risk/RiskManager";
+import { getTradesService } from "@/lib/services/TradesService";
+import { supabase } from "@/lib/supabase/client";
+import {
+  getMarketDataStreamService,
+  PriceUpdate,
+} from "@/lib/services/MarketDataStreamService";
+import Watchlist from "./trading/Watchlist";
+import OrderForm, { OrderPayload } from "./trading/OrderForm";
+import PositionsTable from "./trading/PositionsTable";
+import OrdersTable from "./trading/OrdersTable";
+import { OptionsChain } from "./OptionsChain";
+import { PriceAlerts } from "./PriceAlerts";
+import ResyncButton from "./ResyncButton";
+import {
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  Wallet,
+  LayoutList,
+  TrendingUp,
+  AlertTriangle,
+  Loader2,
+  CheckCircle,
+  AlertCircle,
+  Info,
+} from "lucide-react";
+import AIAnalysisPanel from "./trading/Aianalysispanel";
+import DeactivateTradingButton from "./deactiveButton";
 
-const WATCHLIST_KEY = 'scrip_watchlist';
-
-const DEBUG = true;
-const log  = (...a: any[]) => console.log('[OC]', ...a);
-const warn = (...a: any[]) => console.warn('[OC]', ...a);
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface OptionLeg {
-  scrip: ScripResult;
-  ltp: number;
-  ltpLoading: boolean;
+interface TradingPanelProps {
+  sessionInfo: any;
+  onSessionExpired?: () => void;
 }
 
-interface OptionChainRow {
-  strike: number;
-  ce: OptionLeg | null;
-  pe: OptionLeg | null;
-}
+type BottomTab = "positions" | "orders" | "chain" | "alerts" | "ai";
 
-interface ExpiryInfo {
-  label: string;
-  /** Raw string used as ilike pattern fallback – two variants tried */
-  raw: string;
-  expiryTs?: number;
-  /** TRUE = weekly (e.g. NIFTY25APR7xxxCE), FALSE = monthly (NIFTY25APR24xxxCE) */
-  isWeekly?: boolean;
-}
+export default function TradingPanel({
+  sessionInfo,
+  onSessionExpired,
+}: TradingPanelProps) {
+  const trading = useKotakTrading();
+  const [selectedScrip, setSelectedScrip] = useState<ScripResult | null>(null);
+  const [defaultSide, setDefaultSide] = useState<"BUY" | "SELL">("BUY");
+  const [bottomTab, setBottomTab] = useState<BottomTab>("positions");
+  const [showResync, setShowResync] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
 
-interface OptionsChainProps {
-  onSelectScrip: (scrip: ScripResult, side: 'BUY' | 'SELL') => void;
-  niftyLTP?: number | null;
-}
+  const [selectedScripLTP, setSelectedScripLTP] = useState<number | undefined>(
+    undefined,
+  );
 
-// ─── Supabase ─────────────────────────────────────────────────────────────────
+  const [tradingEnabled, setTradingEnabled] = useState<boolean | null>(null);
+  const [tradingDisabledReason, setTradingDisabledReason] = useState<
+    string | null
+  >(null);
+  const [showRules, setShowRules] = useState(false);
+  const [niftyLTP, setNiftyLTP] = useState<number | null>(null);
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-);
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function roundToNearest50(n: number) {
-  return Math.round(n / 50) * 50;
-}
-
-function toScrip(row: any): ScripResult {
-  return {
-    id:            row.id,
-    p_symbol:      row.p_symbol,
-    p_exch_seg:    row.p_exch_seg || 'nse_fo',
-    p_trd_symbol:  row.p_trd_symbol,
-    l_lot_size:    row.l_lot_size || 75,
-    p_instr_name:  row.p_instr_name || '',
-    l_expiry_date: row.l_expiry_date,
-    segment:       row.segment || 'nse_fo',
-    p_tok:         row.p_tok ?? row.p_symbol,
-  };
-}
-
-const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-
-/**
- * Build ALL possible ilike pattern variants for a given expiry date.
- *
- * NSE FO naming conventions observed in practice:
- *
- *  Weekly  : NIFTY25APR7200CE   (day WITHOUT leading zero)
- *  Weekly  : NIFTY25APR07200CE  (day WITH leading zero – some brokers pad it)
- *  Monthly : NIFTY25APR24200CE  (full 2-digit year suffix before strike – legacy)
- *  Monthly : NIFTY25APR2024200CE (4-digit year – rare, but seen)
- *
- * We build patterns that cover all these variants so the ilike fallback
- * never silently misses rows.
- */
-function buildIlikePatterns(expiryTs: number): string[] {
-  const d   = new Date(expiryTs * 1000);
-  const yy  = String(d.getUTCFullYear()).slice(2);   // "25"
-  const mon = MONTHS[d.getUTCMonth()];               // "APR"
-  const dd  = d.getUTCDate();                        // 7  (no padding)
-  const ddP = String(dd).padStart(2, '0');           // "07"
-
-  return [
-    // Weekly without padding:  NIFTY25APR7%
-    `NIFTY${yy}${mon}${dd}%`,
-    // Weekly with padding:     NIFTY25APR07%
-    `NIFTY${yy}${mon}${ddP}%`,
-    // Monthly (last Thursday): NIFTY25APR%  ← broad, filtered by expiryTs later
-    // We still include a narrow one so it can match monthly symbols:
-    `NIFTY${yy}${mon}24%`,   // e.g. NIFTY25APR24xxxCE  (day=24 last Thursday)
-  ];
-}
-
-/**
- * Extract strike + option type from a DB row.
- * Priority: dedicated DB columns → p_trd_symbol regex.
- * Range guard: 1,000–99,999 to cover all current + future NIFTY levels.
- */
-function getStrikeAndType(
-  row: any,
-  strikeCol: string | null,
-  optTypeCol: string | null
-): { strike: number; optType: string } | null {
-  let strike: number | null  = null;
-  let optType: string | null = null;
-
-  // 1. Dedicated DB columns
-  if (strikeCol) {
-    const raw = parseFloat(String(row[strikeCol] ?? 0));
-    if (raw >= 1_000 && raw <= 99_999) strike = raw;
-  }
-  if (optTypeCol) {
-    const val = String(row[optTypeCol] ?? '').toUpperCase().trim();
-    if (val === 'CE' || val === 'PE') optType = val;
-  }
-
-  // 2. Parse p_trd_symbol as fallback
-  // Handles ALL known NSE FO naming formats:
-  //   Format A (alpha month): NIFTY25APR722500CE, NIFTY25APR2422500PE
-  //   Format B (numeric YYMMDD): NIFTY2640722900CE  (YY=26, MM=04, DD=07, strike=22900)
-  //   Format C (numeric YYMDD): NIFTY264722900CE   (YY=26, M=4, DD=07)
-  if (!strike || !optType) {
-    const sym = (row.p_trd_symbol || '').toUpperCase();
-
-    // Strip the known prefix "NIFTY" then greedily try to find strike+type at the end
-    // Strategy: the option type is always the last 2 chars (CE or PE),
-    // and the strike is the numeric block immediately before it.
-    // We try different prefix lengths (4–7 chars for date encoding) to isolate the strike.
-    const typeMatch = sym.match(/(CE|PE)$/);
-    if (typeMatch) {
-      if (!optType) optType = typeMatch[1];
-      // Everything between "NIFTY" and "CE/PE": e.g. "2640717200" from "NIFTY2640717200CE"
-      const body = sym.replace(/^NIFTY/, '').replace(/(CE|PE)$/, '');
-      // body is all digits. Date prefix is 5 or 6 digits (YYMMDD=6, YYMDD=5, YYDDD=5).
-      // Strike is the remaining suffix — try suffix lengths 4,5,6 and pick
-      // the one closest to a known NIFTY range (15000–35000).
-      const candidates: number[] = [];
-      for (let suffixLen = 4; suffixLen <= 6; suffixLen++) {
-        if (body.length > suffixLen) {
-          const s = parseInt(body.slice(-suffixLen), 10);
-          if (s >= 10_000 && s <= 35_000) candidates.push(s);
-        }
-      }
-      // Also try alpha-month format as a final catch
-      const alphaMatch = sym.match(/[A-Z]{3}\d{0,4}?(\d{4,6})(CE|PE)$/);
-      if (alphaMatch) {
-        const s = parseInt(alphaMatch[1], 10);
-        if (s >= 10_000 && s <= 35_000) candidates.push(s);
-      }
-
-      if (!strike && candidates.length > 0) {
-        // Pick candidate closest to 22500 (rough midpoint of typical NIFTY range)
-        // This handles ambiguity when multiple suffix lengths are valid
-        strike = candidates.reduce((best, c) =>
-          Math.abs(c - 22_500) < Math.abs(best - 22_500) ? c : best
-        );
-      }
-    }
-  }
-
-  if (!strike || !optType) return null;
-  return { strike, optType };
-}
-
-/**
- * Fetch scrip_master rows for a given expiry using a multi-strategy approach:
- *
- *  Strategy A: exact timestamp match  (fastest, works when ts is stored correctly)
- *  Strategy B: ±24 h timestamp window (handles IST/UTC midnight offset issues)
- *  Strategy C: ilike on all symbol variants (handles any timestamp discrepancy)
- *
- * Returns as soon as any strategy yields rows.
- */
-async function fetchChainRows(expiry: ExpiryInfo): Promise<any[]> {
-  const ts = expiry.expiryTs;
-
-  // ── Strategy A: exact ts ──────────────────────────────────────────────────
-  if (ts !== undefined) {
-    const { data, error } = await supabase
-      .from('scrip_master')
-      .select('*')
-      .eq('p_symbol', 'NIFTY')
-      .eq('segment', 'nse_fo')
-      .eq('l_expiry_date', ts);
-
-    log(`[fetchChainRows] Strategy A (exact ts=${ts}): ${data?.length ?? 0} rows, error:`, error);
-    if (!error && data && data.length > 0) return data;
-  }
-
-  // ── Strategy B: ±24 h window around ts ────────────────────────────────────
-  if (ts !== undefined) {
-    const lo = ts - 86_400;   // -24 h
-    const hi = ts + 86_400;   // +24 h
-
-    const { data, error } = await supabase
-      .from('scrip_master')
-      .select('*')
-      .eq('p_symbol', 'NIFTY')
-      .eq('segment', 'nse_fo')
-      .gte('l_expiry_date', lo)
-      .lte('l_expiry_date', hi);
-
-    log(`[fetchChainRows] Strategy B (±24h window ${lo}–${hi}): ${data?.length ?? 0} rows, error:`, error);
-
-    if (!error && data && data.length > 0) {
-      // If multiple distinct timestamps returned, pick the one closest to ts
-      const tsCounts = new Map<number, number>();
-      data.forEach((r: any) => tsCounts.set(r.l_expiry_date, (tsCounts.get(r.l_expiry_date) ?? 0) + 1));
-      log('[fetchChainRows] Timestamps in window:', Array.from(tsCounts.entries()));
-
-      let bestTs = ts;
-      let bestDiff = Infinity;
-      tsCounts.forEach((_, candidateTs) => {
-        const diff = Math.abs(candidateTs - ts);
-        if (diff < bestDiff) { bestDiff = diff; bestTs = candidateTs; }
-      });
-
-      const filtered = data.filter((r: any) => r.l_expiry_date === bestTs);
-      log(`[fetchChainRows] Strategy B winner ts=${bestTs}, rows=${filtered.length}`);
-      if (filtered.length > 0) return filtered;
-    }
-  }
-
-  // ── Strategy C: ilike on symbol variants ──────────────────────────────────
-  const patterns = ts !== undefined
-    ? buildIlikePatterns(ts)
-    : [`NIFTY${expiry.raw}%`]; // legacy fallback when no ts
-
-  log('[fetchChainRows] Strategy C ilike patterns:', patterns);
-
-  for (const pattern of patterns) {
-    const { data, error } = await supabase
-      .from('scrip_master')
-      .select('*')
-      .eq('p_symbol', 'NIFTY')
-      .eq('segment', 'nse_fo')
-      .ilike('p_trd_symbol', pattern);
-
-    log(`[fetchChainRows] Strategy C pattern "${pattern}": ${data?.length ?? 0} rows, error:`, error);
-    if (!error && data && data.length > 0) return data;
-  }
-
-  // ── Strategy D: broad symbol prefix + manual ts filter ────────────────────
-  // Last resort: pull all NIFTY FO rows near the date and filter client-side
-  if (ts !== undefined) {
-    const d   = new Date(ts * 1000);
-    const yy  = String(d.getUTCFullYear()).slice(2);
-    const mon = MONTHS[d.getUTCMonth()];
-    const broadPattern = `NIFTY${yy}${mon}%`;
-
-    const { data, error } = await supabase
-      .from('scrip_master')
-      .select('*')
-      .eq('p_symbol', 'NIFTY')
-      .eq('segment', 'nse_fo')
-      .ilike('p_trd_symbol', broadPattern);
-
-    log(`[fetchChainRows] Strategy D broad "${broadPattern}": ${data?.length ?? 0} rows, error:`, error);
-
-    if (!error && data && data.length > 0) {
-      // Group by l_expiry_date and return the group whose date is closest to ts
-      const groups = new Map<number, any[]>();
-      data.forEach((r: any) => {
-        const g = groups.get(r.l_expiry_date) ?? [];
-        g.push(r);
-        groups.set(r.l_expiry_date, g);
-      });
-
-      let bestRows: any[] = [];
-      let bestDiff = Infinity;
-      groups.forEach((rows, candidateTs) => {
-        const diff = Math.abs(candidateTs - ts);
-        if (diff < bestDiff) { bestDiff = diff; bestRows = rows; }
-      });
-
-      log(`[fetchChainRows] Strategy D best group size=${bestRows.length}, diff=${bestDiff}s`);
-      if (bestRows.length > 0) return bestRows;
-    }
-  }
-
-  warn('[fetchChainRows] All strategies exhausted — no rows found');
-  return [];
-}
-
-// ─── Component ────────────────────────────────────────────────────────────────
-
-export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
-  const [spot,           setSpot]           = useState<number | null>(null);
-  const [spotLoading,    setSpotLoading]    = useState(true);
-  const [expiries,       setExpiries]       = useState<ExpiryInfo[]>([]);
-  const [selectedExpiry, setSelectedExpiry] = useState<ExpiryInfo | null>(null);
-  const [chain,          setChain]          = useState<OptionChainRow[]>([]);
-  const [chainLoading,   setChainLoading]   = useState(false);
-  const [lastUpdated,    setLastUpdated]    = useState<Date | null>(null);
-  const [lotSize,        setLotSize]        = useState(65);
-  const [watchlistSet,   setWatchlistSet]   = useState<Set<string>>(new Set());
-  const [fetchStrategy,  setFetchStrategy]  = useState<string>('');  // debug display
-
-  const chainRef   = useRef<OptionChainRow[]>([]);
-  chainRef.current = chain;
-  const atmRowRef  = useRef<HTMLDivElement | null>(null);
-  const ltpMapRef  = useRef<Map<string, number>>(new Map());
-
-  // ── Watchlist ─────────────────────────────────────────────────────────────
-
+  // ── Connect with session on mount ────────────────────────────────────────
   useEffect(() => {
+    if (sessionInfo && !trading.isConnected) {
+      trading.connectWithSession(sessionInfo);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionInfo]);
+
+  // ── Check trading status ──────────────────────────────────────────────────
+  const refreshTradingStatus = useCallback(async () => {
     try {
-      const saved = localStorage.getItem(WATCHLIST_KEY);
-      if (saved) {
-        const items: ScripResult[] = JSON.parse(saved);
-        setWatchlistSet(new Set(items.map(s => s.p_trd_symbol)));
-      }
-    } catch { /* ignore */ }
+      const { isEnabled, reason } = await tradingRulesService.isTradingEnabled();
+
+      const tradesService = getTradesService();
+      const manualStatus = await tradesService.getTradingEnabled();
+
+      const finalEnabled = isEnabled && (manualStatus?.isEnabled ?? true);
+      const finalReason = !manualStatus?.isEnabled
+        ? (manualStatus?.disabledReason ?? "Manually disabled")
+        : reason;
+
+      setTradingEnabled(finalEnabled);
+      setTradingDisabledReason(finalReason);
+    } catch (error) {
+      console.error("[TradingPanel] Failed to check trading status:", error);
+      setTradingEnabled(false);
+      setTradingDisabledReason("Unable to check status");
+    }
   }, []);
 
-  const toggleWatchlist = useCallback((scrip: ScripResult) => {
-    try {
-      const saved   = localStorage.getItem(WATCHLIST_KEY);
-      const current: ScripResult[] = saved ? JSON.parse(saved) : [];
-      const exists  = current.some(s => s.p_trd_symbol === scrip.p_trd_symbol);
-      const updated = exists
-        ? current.filter(s => s.p_trd_symbol !== scrip.p_trd_symbol)
-        : [...current, scrip];
-      localStorage.setItem(WATCHLIST_KEY, JSON.stringify(updated));
-      setWatchlistSet(new Set(updated.map(s => s.p_trd_symbol)));
-      window.dispatchEvent(new StorageEvent('storage', {
-        key: WATCHLIST_KEY,
-        newValue: JSON.stringify(updated),
-      }));
-    } catch { /* ignore */ }
-  }, []);
-
-  // ── Step 1: Load expiries ─────────────────────────────────────────────────
-
   useEffect(() => {
-    const load = async () => {
+    refreshTradingStatus();
+    const interval = setInterval(refreshTradingStatus, 10000);
+    return () => clearInterval(interval);
+  }, [refreshTradingStatus]);
+
+  // ── Live LTP for selected scrip ──────────────────────────────────────────
+  useEffect(() => {
+    if (!selectedScrip) return;
+
+    const seg   = (selectedScrip.p_exch_seg || selectedScrip.segment || "nse_fo").toLowerCase();
+    const token = selectedScrip.p_tok ?? selectedScrip.p_symbol;
+    if (!token) return;
+
+    let cancelled = false;
+
+    const fetchLTP = async () => {
+      if (cancelled) return;
       try {
-        const nowTs = Math.floor(Date.now() / 1000);
-
-        const { data, error } = await supabase
-          .from('scrip_master')
-          .select('p_trd_symbol, l_expiry_date, l_lot_size, p_symbol')
-          .eq('p_symbol', 'NIFTY')
-          .eq('segment', 'nse_fo')
-          .gte('l_expiry_date', nowTs)
-          .order('l_expiry_date', { ascending: true });
-
-        log('=== EXPIRY QUERY ===');
-        log('Row count:', data?.length, '| Error:', error);
-        log('First 10 p_trd_symbols:', data?.slice(0, 10).map((r: any) => r.p_trd_symbol));
-
-        const makeFallback = (): ExpiryInfo[] => [
-          { label: '07 APR', raw: '25APR07', expiryTs: undefined },
-          { label: '13 APR', raw: '25APR13', expiryTs: undefined },
-          { label: '24 APR', raw: '25APR24', expiryTs: undefined },
-        ];
-
-        if (error || !data?.length) {
-          warn('Expiry query failed — using fallback');
-          const fallback = makeFallback();
-          setExpiries(fallback);
-          setSelectedExpiry(fallback[0]);
-          return;
-        }
-
-        // Collect unique timestamps and their row counts
-        // A timestamp with many CE+PE rows is likely a valid expiry
-        const tsCounts = new Map<number, number>();
-        data.forEach((row: any) => {
-          if (row.l_expiry_date) {
-            tsCounts.set(row.l_expiry_date, (tsCounts.get(row.l_expiry_date) ?? 0) + 1);
-          }
-        });
-
-        log('Timestamp counts:', Array.from(tsCounts.entries()).map(([ts, n]) => `${ts}=${n}`));
-
-        // Keep only timestamps with at least 2 rows (avoids noise)
-        const seen = new Map<number, ExpiryInfo>();
-        tsCounts.forEach((count, ts) => {
-          if (count < 2 || seen.has(ts)) return;
-          if (ts < nowTs) return;
-
-          const d   = new Date(ts * 1000);
-          const dd  = String(d.getUTCDate()).padStart(2, '0');
-          const mon = MONTHS[d.getUTCMonth()];
-          const label = `${dd} ${mon}`;
-          const yy    = String(d.getUTCFullYear()).slice(2);
-          const raw   = `${yy}${mon}${dd}`;   // e.g. "25APR07"
-
-          seen.set(ts, { label, raw, expiryTs: ts });
-        });
-
-        const list = Array.from(seen.values()).sort((a, b) => (a.expiryTs ?? 0) - (b.expiryTs ?? 0));
-        log('Expiry list:', list.map(e => `${e.label} (ts=${e.expiryTs})`));
-
-        if (list.length) {
-          setExpiries(list);
-          setSelectedExpiry(list[0]);
-          const lotRow = data.find((r: any) => (r.l_lot_size || 0) > 0);
-          if (lotRow?.l_lot_size) setLotSize(lotRow.l_lot_size);
-        } else {
-          const fallback = makeFallback();
-          setExpiries(fallback);
-          setSelectedExpiry(fallback[0]);
+        const result = await kotakTradingService.getLTP(token, seg);
+        if (result?.ltp > 0 && !cancelled) {
+          setSelectedScripLTP(result.ltp);
         }
       } catch (err) {
-        console.error('[OptionsChain] loadExpiries:', err);
+        console.warn("[TradingPanel] selectedScrip LTP fetch failed:", err);
       }
     };
-    load();
-  }, []);
 
-  // ── Step 2: Spot from parent ──────────────────────────────────────────────
+    fetchLTP();
+    const id = setInterval(fetchLTP, 2000);
 
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+      setSelectedScripLTP(undefined);
+    };
+  }, [selectedScrip?.p_tok, selectedScrip?.p_exch_seg, trading.isConnected]);
+
+  // ── NIFTY 50 live price via WebSocket (REST fallback) ────────────────────
   useEffect(() => {
-    if (niftyLTP && niftyLTP > 1000) {
-      setSpot(niftyLTP);
-      setSpotLoading(false);
-    }
-  }, [niftyLTP]);
+    if (!trading.isConnected) return;
 
-  const fetchSpot = useCallback(async () => {
-    if (niftyLTP && niftyLTP > 1000) return;
-    try {
-      const nowTs = Math.floor(Date.now() / 1000);
-      const { data: foRows } = await supabase
-        .from('scrip_master')
-        .select('p_trd_symbol, p_symbol, p_tok')
-        .eq('p_symbol', 'NIFTY')
-        .eq('segment', 'nse_fo')
-        .gte('l_expiry_date', nowTs)
-        .order('l_expiry_date', { ascending: true })
-        .limit(30);
+    const NIFTY_TOKEN = "26000";
+    const NIFTY_SEG   = "nse_cm";
+    const scripKey    = `${NIFTY_SEG}|${NIFTY_TOKEN}`;
 
-      if (!foRows?.length) { setSpotLoading(false); return; }
+    let wsRef: any = null;
+    let heartbeatRef: ReturnType<typeof setInterval> | null = null;
+    let pollRef: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
 
-      const batch = foRows.slice(0, 10);
-      const res   = await quotesService.getQuotes(
-        batch.map(r => ({ segment: 'nse_fo', symbol: r.p_tok ?? r.p_symbol })), 'ltp'
-      );
+    const session = (() => {
+      try {
+        return JSON.parse(localStorage.getItem("kotak_session") || "{}");
+      } catch {
+        return {};
+      }
+    })();
 
-      if (res.success && res.data?.length) {
-        let bestSpot = 0;
-        for (let i = 0; i < (res.data as any[]).length; i++) {
-          const q      = res.data[i] as any;
-          const ltp    = parseFloat(String(q.ltp ?? q.ltP ?? q.lp ?? 0));
-          const sym    = batch[i]?.p_trd_symbol || '';
-          // Updated regex: handles weekly (no padding) + monthly
-          const m      = sym.toUpperCase().match(/(\d{5,6})(CE|PE)$/);
-          if (m && ltp > 0) {
-            const parsed = parseInt(m[1], 10);
-            if (parsed >= 1_000 && parsed <= 99_999) {
-              const approxSpot = parsed + ltp;
-              if (approxSpot > bestSpot) bestSpot = approxSpot;
-            }
-          }
+    const startRestPoll = () => {
+      if (cancelled || pollRef) return;
+      const doFetch = async () => {
+        if (cancelled) return;
+        try {
+          const result = await kotakTradingService.getLTP(NIFTY_TOKEN, NIFTY_SEG);
+          if (result?.ltp > 0 && !cancelled) setNiftyLTP(result.ltp);
+        } catch (err) {
+          console.warn("[TradingPanel] NIFTY REST fetch failed:", err);
         }
-        if (bestSpot > 1000) setSpot(Math.round(bestSpot));
+      };
+      doFetch();
+      pollRef = setInterval(doFetch, 5000);
+    };
+
+    if (
+      session?.tradingToken &&
+      session?.tradingSid &&
+      typeof window !== "undefined"
+    ) {
+      try {
+        const WsClass =
+          typeof (window as any).HSWebSocket === "function"
+            ? (window as any).HSWebSocket
+            : WebSocket;
+
+        const ws = new WsClass("wss://mlhsm.kotaksecurities.com");
+        wsRef = ws;
+
+        ws.onopen = () => {
+          ws.send(JSON.stringify({ Authorization: session.tradingToken, Sid: session.tradingSid, type: "cn" }));
+          heartbeatRef = setInterval(() => {
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ti", scrips: "" }));
+          }, 30_000);
+          setTimeout(() => {
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: "mws", scrips: scripKey, channelnum: 1 }));
+            }
+          }, 800);
+        };
+
+        ws.onmessage = (msgOrEvent: any) => {
+          try {
+            const raw    = typeof msgOrEvent === "string" ? msgOrEvent : msgOrEvent?.data;
+            if (!raw) return;
+            const data   = typeof raw === "string" ? JSON.parse(raw) : raw;
+            const quotes = Array.isArray(data) ? data : data?.data ? data.data : [data];
+            for (const q of quotes) {
+              if (!q) continue;
+              const tickToken = String(q.tk ?? q.token ?? "");
+              if (tickToken && tickToken !== NIFTY_TOKEN) continue;
+              const rawLtp = q.ltp ?? q.ltP ?? q.lp ?? q.last_price;
+              if (rawLtp === undefined) continue;
+              const price = parseFloat(String(rawLtp));
+              if (price > 1000 && !cancelled) setNiftyLTP(price);
+            }
+          } catch { /* ignore */ }
+        };
+
+        ws.onerror = () => startRestPoll();
+        ws.onclose = () => {
+          if (heartbeatRef) { clearInterval(heartbeatRef); heartbeatRef = null; }
+          if (!cancelled) startRestPoll();
+        };
+      } catch {
+        startRestPoll();
       }
-      setSpotLoading(false);
-    } catch (err) {
-      console.error('[OptionsChain] fetchSpot:', err);
-      setSpotLoading(false);
+    } else {
+      startRestPoll();
     }
-  }, [niftyLTP]);
+
+    return () => {
+      cancelled = true;
+      if (heartbeatRef) clearInterval(heartbeatRef);
+      if (pollRef)      clearInterval(pollRef);
+      if (wsRef) { try { wsRef.close(); } catch { /* ignore */ } }
+    };
+  }, [trading.isConnected]);
+
+  // ── Auto-refresh with dynamic polling ────────────────────────────────────
+  useEffect(() => {
+    if (!trading.isConnected || !isMarketOpen()) return;
+
+    const pollingService = getDynamicPollingService();
+    const hasPositions   = trading.positions.length > 0;
+
+    const pollCallback = async () => {
+      if (isMarketOpen()) {
+        await trading.refreshData();
+        setLastRefreshed(new Date());
+      } else {
+        pollingService.stopPolling();
+      }
+    };
+
+    if (!pollingService.isActive()) {
+      pollingService.startPolling(pollCallback, hasPositions);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trading.isConnected]);
+
+  // ── Update polling interval when position count changes ──────────────────
+  useEffect(() => {
+    const pollingService = getDynamicPollingService();
+    pollingService.updatePositionStatus(trading.positions.length > 0);
+  }, [trading.positions.length]);
+
+  // ── Cache positions tokens to localStorage ───────────────────────────────
+  useEffect(() => {
+    if (!trading.isConnected || trading.positions.length === 0) return;
+    const positionsForCache = trading.positions.map((p) => ({
+      trdSym:  (p as any).symbol,
+      tok:     (p as any).tok,
+      exSeg:   (p as any).exchange,
+    }));
+    localStorage.setItem("kotak_positions", JSON.stringify(positionsForCache));
+  }, [trading.positions, trading.isConnected]);
+
+  // ── Bubble session expiry to parent ──────────────────────────────────────
+  useEffect(() => {
+    if (trading.sessionExpired && onSessionExpired) onSessionExpired();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trading.sessionExpired]);
+
+  // ── Live WebSocket for open positions ────────────────────────────────────
+  const positionSymbolsKey = trading.positions
+    .filter((p) => (p.quantity || 0) !== 0)
+    .map((p) => `${(p as any).exchange || "nse_fo"}|${(p as any).tok || p.symbol}`)
+    .sort()
+    .join(",");
 
   useEffect(() => {
-    fetchSpot();
-    const iv = setInterval(fetchSpot, 10_000);
-    return () => clearInterval(iv);
-  }, [fetchSpot]);
+    if (!trading.isConnected) return;
 
-  // ── Step 3: Build chain ───────────────────────────────────────────────────
+    const openPositions = trading.positions.filter((p) => (p.quantity || 0) !== 0);
+    if (openPositions.length === 0) return;
 
-  const loadChain = useCallback(async (expiry: ExpiryInfo, atmSpot: number) => {
-    setChainLoading(true);
-    setFetchStrategy('');
+    const session = JSON.parse(localStorage.getItem("kotak_session") || "{}");
+    if (!session?.tradingToken || !session?.tradingSid) return;
+
+    let wsRef: any = null;
+    let heartbeatRef: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
+
+    const tokenToTrdSym: Record<string, string> = {};
+    const positionScrips: string[] = [];
+
+    for (const pos of openPositions) {
+      const trdSym   = (pos as any).symbol   || "";
+      const tok      = (pos as any).tok       || "";
+      const exchange = ((pos as any).exchange || "nse_fo").toLowerCase();
+      if (tok) {
+        positionScrips.push(`${exchange}|${tok}`);
+        tokenToTrdSym[tok]    = trdSym;
+        tokenToTrdSym[trdSym] = trdSym;
+      } else if (trdSym) {
+        positionScrips.push(`${exchange}|${trdSym}`);
+        tokenToTrdSym[trdSym] = trdSym;
+      }
+    }
+
+    if (positionScrips.length === 0) return;
+
     try {
-      const atm = roundToNearest50(atmSpot);
-      log('=== LOAD CHAIN ===');
-      log(`Expiry: ${expiry.label} | raw: ${expiry.raw} | expiryTs: ${expiry.expiryTs} | ATM: ${atm}`);
+      const WsClass =
+        typeof (window as any).HSWebSocket === "function"
+          ? (window as any).HSWebSocket
+          : WebSocket;
 
-      // ── Fetch rows via multi-strategy helper ────────────────────────────
-      const rows = await fetchChainRows(expiry);
+      const ws = new WsClass("wss://mlhsm.kotaksecurities.com");
+      wsRef = ws;
 
-      log(`Total rows after all strategies: ${rows.length}`);
-      if (!rows.length) {
-        warn('No chain rows found by any strategy — aborting');
-        setChain([]);
-        setChainLoading(false);
-        return;
-      }
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ Authorization: session.tradingToken, Sid: session.tradingSid, type: "cn" }));
+        heartbeatRef = setInterval(() => {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ti", scrips: "" }));
+        }, 30000);
+        setTimeout(() => {
+          if (ws.readyState === 1) {
+            positionScrips.forEach((scrip, idx) => {
+              ws.send(JSON.stringify({ type: "mws", scrips: scrip, channelnum: idx + 2 }));
+            });
+          }
+        }, 800);
+      };
 
-      // ── Inspect DB schema ───────────────────────────────────────────────
-      const firstRow   = rows[0];
-      const allCols    = Object.keys(firstRow);
-      const strikeCol  = allCols.find(c => c === 'l_strike_price') ??
-                         allCols.find(c => c === 'strike_price')    ??
-                         allCols.find(c => c.toLowerCase().includes('strike')) ??
-                         null;
-      const optTypeCol = allCols.find(c => c === 'p_option_type') ??
-                         allCols.find(c => c === 'option_type')    ??
-                         allCols.find(c => c.toLowerCase().includes('option')) ??
-                         null;
+      ws.onmessage = (msgOrEvent: any) => {
+        try {
+          const raw    = typeof msgOrEvent === "string" ? msgOrEvent : msgOrEvent?.data;
+          if (!raw) return;
+          const data   = typeof raw === "string" ? JSON.parse(raw) : raw;
+          const quotes = Array.isArray(data) ? data : data?.data ? data.data : [data];
+          for (const q of quotes) {
+            if (!q) continue;
+            const rawLtp = q.ltp ?? q.ltP ?? q.lp ?? q.last_price;
+            if (rawLtp === undefined) continue;
+            const price = parseFloat(String(rawLtp));
+            if (price <= 0 || cancelled) continue;
+            const wsToken  = q.tk   || q.token  || "";
+            const wsTrdSym = q.tsym || q.sym     || q.display_symbol || "";
+            const matchedSym = tokenToTrdSym[wsToken] || tokenToTrdSym[wsTrdSym] || "";
+            if (matchedSym) trading.updatePositionLTP(matchedSym, price);
+          }
+        } catch { /* ignore */ }
+      };
 
-      log('Strike col:', strikeCol, '| OptType col:', optTypeCol);
-      log('Sample p_trd_symbols:', rows.slice(0, 8).map((r: any) => r.p_trd_symbol));
-
-      // ── Lot size ────────────────────────────────────────────────────────
-      const lotRow = rows.find((r: any) => (r.l_lot_size || 0) > 0);
-      if (lotRow) setLotSize(lotRow.l_lot_size);
-
-      // ── Collect valid strikes ───────────────────────────────────────────
-      const allStrikeSet = new Set<number>();
-      rows.forEach((row: any) => {
-        const result = getStrikeAndType(row, strikeCol, optTypeCol);
-        if (result) allStrikeSet.add(result.strike);
-      });
-
-      const allStrikes = Array.from(allStrikeSet).sort((a, b) => a - b);
-      log(`Valid strikes (${allStrikes.length}):`, allStrikes);
-
-      if (!allStrikes.length) {
-        warn('Zero valid strikes extracted! Raw sample:', rows.slice(0, 3));
-        setChain([]);
-        setChainLoading(false);
-        return;
-      }
-
-      // ATM index — find closest strike to spot
-      let atmIdx = allStrikes.reduce((bestIdx, s, idx) => {
-        return Math.abs(s - atm) < Math.abs(allStrikes[bestIdx] - atm) ? idx : bestIdx;
-      }, 0);
-
-      const start          = Math.max(0, atmIdx - 5);
-      const end            = Math.min(allStrikes.length - 1, atmIdx + 5);
-      const visibleStrikes = new Set(allStrikes.slice(start, end + 1));
-      log(`ATM idx: ${atmIdx} (strike=${allStrikes[atmIdx]}) | Visible:`, Array.from(visibleStrikes));
-
-      // ── Build strike map ────────────────────────────────────────────────
-      const strikeMap = new Map<number, { ce?: any; pe?: any }>();
-      rows.forEach((row: any) => {
-        const result = getStrikeAndType(row, strikeCol, optTypeCol);
-        if (!result || !visibleStrikes.has(result.strike)) return;
-        if (!strikeMap.has(result.strike)) strikeMap.set(result.strike, {});
-        const e = strikeMap.get(result.strike)!;
-        if (result.optType === 'CE') e.ce = row; else e.pe = row;
-      });
-
-      const newChain: OptionChainRow[] = Array.from(strikeMap.keys())
-        .sort((a, b) => a - b)
-        .map(strike => {
-          const e       = strikeMap.get(strike)!;
-          const ceScrip = e.ce ? toScrip(e.ce) : null;
-          const peScrip = e.pe ? toScrip(e.pe) : null;
-          const ceLtp   = ceScrip ? (ltpMapRef.current.get(ceScrip.p_tok ?? '') ?? 0) : 0;
-          const peLtp   = peScrip ? (ltpMapRef.current.get(peScrip.p_tok ?? '') ?? 0) : 0;
-          return {
-            strike,
-            ce: ceScrip ? { scrip: ceScrip, ltp: ceLtp, ltpLoading: ceLtp === 0 } : null,
-            pe: peScrip ? { scrip: peScrip, ltp: peLtp, ltpLoading: peLtp === 0 } : null,
-          };
-        });
-
-      log(`✅ Chain ready: ${newChain.length} rows | strikes:`, newChain.map(r => r.strike));
-      setChain(newChain);
-    } catch (err) {
-      console.error('[OptionsChain] loadChain:', err);
-      setChain([]);
-    } finally {
-      setChainLoading(false);
+      ws.onerror = () => console.warn("[TradingPanel] Position WebSocket error");
+      ws.onclose = () => {
+        if (heartbeatRef) { clearInterval(heartbeatRef); heartbeatRef = null; }
+      };
+    } catch (error) {
+      console.error("[TradingPanel] Error starting position WebSocket:", error);
     }
-  }, []);
 
-  const lastAtmRef = useRef<number>(0);
-  useEffect(() => {
-    if (!selectedExpiry) return;
-    const currentSpot = niftyLTP ?? spot ?? 24500;
-    const newAtm      = roundToNearest50(currentSpot);
-    if (newAtm !== lastAtmRef.current || selectedExpiry.raw !== (window as any).__lastExpiry) {
-      lastAtmRef.current           = newAtm;
-      (window as any).__lastExpiry = selectedExpiry.raw;
-      loadChain(selectedExpiry, currentSpot);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedExpiry?.raw, roundToNearest50(niftyLTP ?? spot ?? 24500)]);
+    return () => {
+      cancelled = true;
+      if (heartbeatRef) clearInterval(heartbeatRef);
+      if (wsRef) { try { wsRef.close(); } catch { /* ignore */ } }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positionSymbolsKey, trading.isConnected]);
 
-  // ── Step 4: Auto-scroll to ATM ────────────────────────────────────────────
+  // ── Handlers ─────────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    if (!chain.length || !atmRowRef.current) return;
-    const t = setTimeout(() => {
-      atmRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }, 80);
-    return () => clearTimeout(t);
-  }, [chain]);
+  const handleManualRefresh = async () => {
+    await trading.refreshData();
+    setLastRefreshed(new Date());
+  };
 
-  // ── Step 5: LTP polling every 2s ──────────────────────────────────────────
+  const handleWatchlistSelect = (scrip: ScripResult, side: "BUY" | "SELL") => {
+    setSelectedScrip(scrip);
+    setDefaultSide(side);
+    setSelectedScripLTP(undefined);
+  };
 
-  useEffect(() => { ltpMapRef.current = new Map(); }, [selectedExpiry?.raw]);
-
-  const fetchLTPs = useCallback(async () => {
-    const current = chainRef.current;
-    if (!current.length) return;
-
-    type Q = { rowIdx: number; side: 'ce' | 'pe'; tok: string };
-    const queries: Q[] = [];
-    current.forEach((row, i) => {
-      if (row.ce?.scrip.p_tok) queries.push({ rowIdx: i, side: 'ce', tok: row.ce.scrip.p_tok });
-      if (row.pe?.scrip.p_tok) queries.push({ rowIdx: i, side: 'pe', tok: row.pe.scrip.p_tok });
+  const handleLTPUpdate = (trdSymbol: string, ltp: number) => {
+    setSelectedScrip((current) => {
+      if (current && trdSymbol === current.p_trd_symbol) setSelectedScripLTP(ltp);
+      return current;
     });
-    if (!queries.length) return;
+  };
 
+  const handlePlaceOrder = async (
+    order: OrderPayload,
+  ): Promise<{ success: boolean; message: string }> => {
     try {
-      type Change = { rowIdx: number; side: 'ce' | 'pe'; price: number };
-      const changes: Change[] = [];
-
-      const BATCH = 50;
-      for (let s = 0; s < queries.length; s += BATCH) {
-        const batch = queries.slice(s, s + BATCH);
-        const res   = await quotesService.getQuotes(
-          batch.map(q => ({ segment: 'nse_fo', symbol: q.tok })), 'ltp'
-        );
-        if (!res.success || !res.data) continue;
-
-        (res.data as any[]).forEach((quote, qi) => {
-          const q     = batch[qi];
-          if (!q) return;
-          const raw   = quote.ltp ?? quote.ltP ?? quote.lp ?? quote.last_price;
-          const price = parseFloat(String(raw ?? 0));
-          if (isNaN(price) || price <= 0) return;
-          const prev  = ltpMapRef.current.get(q.tok);
-          if (prev !== price) {
-            ltpMapRef.current.set(q.tok, price);
-            changes.push({ rowIdx: q.rowIdx, side: q.side, price });
-          }
-        });
+      // Guard: double-check kill-switch before every order
+      const tradesService = getTradesService();
+      const manualStatus  = await tradesService.getTradingEnabled();
+      if (!manualStatus?.isEnabled) {
+        return {
+          success: false,
+          message: "⛔ Trading is deactivated. Re-enable in Supabase to resume.",
+        };
       }
 
-      if (changes.length > 0) {
-        setChain(prev => {
-          const next = [...prev];
-          for (const { rowIdx, side, price } of changes) {
-            const row = next[rowIdx];
-            if (!row) continue;
-            if (side === 'ce' && row.ce)
-              next[rowIdx] = { ...row, ce: { ...row.ce, ltp: price, ltpLoading: false } };
-            else if (side === 'pe' && row.pe)
-              next[rowIdx] = { ...row, pe: { ...row.pe, ltp: price, ltpLoading: false } };
-          }
-          return next;
-        });
-        setLastUpdated(new Date());
+      const riskManager  = new RiskManager();
+      const orderRequest = {
+        symbol:       order.trdSymbol,
+        exchange:     order.exchSeg,
+        side:         order.side as any,
+        quantity:     order.quantity,
+        orderType:    order.orderType as any,
+        productType:  order.productType as any,
+        price:        order.price,
+        triggerPrice: order.triggerPrice,
+      };
+
+      const validationResult = await riskManager.validateOrder(orderRequest, {
+        livePositions: trading.positions,
+        liveOrders:    trading.orders,
+      });
+      if (!validationResult.isValid) {
+        return {
+          success: false,
+          message: `Trading rule violation: ${validationResult.errors.join(" | ")}`,
+        };
       }
+
+      const storedAuth = localStorage.getItem("kotak_session");
+      if (!storedAuth) throw new Error("Session not found. Please login again.");
+
+      const session = JSON.parse(storedAuth);
+      const { tradingToken, tradingSid, baseUrl } = session;
+
+      if (!tradingToken || !tradingSid || !baseUrl) {
+        throw new Error("Invalid session - missing authentication credentials. Please login again.");
+      }
+
+      const consumerKey = process.env.NEXT_PUBLIC_KOTAK_CONSUMER_KEY!;
+
+      // Kotak Neo order type codes: "MKT" | "L" | "SL" | "SL-M"
+      // Price is 0 for market & stop-loss-market orders
+      const isMarketOrder = (ot: string) => ot === "MKT" || ot === "SL-M";
+
+      const sendOrder = async (overrides: Partial<typeof order> = {}) => {
+        const o = { ...order, ...overrides };
+        const payload = {
+          action:       "placeOrder",
+          tradingToken, tradingSid, baseUrl, consumerKey,
+          userId:       (await supabase.auth.getUser()).data.user?.id ?? "",
+          am:  "NO",
+          dq:  "0",
+          es:  o.exchSeg,
+          mp:  "0",
+          pc:  o.productType,
+          pf:  "N",
+          // Price must be "0" for MKT and SL-M orders
+          pr:  String(isMarketOrder(o.orderType) ? 0 : o.price),
+          pt:  o.orderType,
+          qty: String(o.quantity),
+          rt:  "DAY",
+          // Trigger price only applies to SL and SL-M orders
+          tp:  String(o.orderType === "SL" || o.orderType === "SL-M" ? (o.triggerPrice ?? 0) : 0),
+          tt:  o.side === "BUY" ? "B" : "S",
+          ts:  o.trdSymbol,
+        };
+
+        const res = await fetch("/api/kotak/trade", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify(payload),
+        });
+
+        const text = await res.text();
+        let data: any;
+        try { data = JSON.parse(text); } catch { return { ok: false, data: null, raw: text }; }
+        return { ok: res.ok, data, raw: text };
+      };
+
+      let { ok, data } = await sendOrder();
+
+      // Fallback: if MKT order rejected (stCode 1041), retry as LIMIT @ LTP
+      if (!ok && data?.details?.stCode === 1041 && order.orderType === "MKT") {
+        const ltp        = await kotakTradingService.getLTP(order.trdSymbol, order.exchSeg);
+        const limitPrice = ltp.ltp > 0 ? ltp.ltp : 0;
+        const retry      = await sendOrder({ orderType: "L", price: limitPrice });
+        ok   = retry.ok;
+        data = retry.data;
+        if (ok && data?.data?.nOrdNo) {
+          await trading.refreshData();
+          setLastRefreshed(new Date());
+          return {
+            success: true,
+            message: `✅ Order placed as LIMIT @ ₹${limitPrice} (market order rejected — LTP unavailable). ID: ${data.data.nOrdNo}`,
+          };
+        }
+      }
+
+      if (ok && data?.data?.nOrdNo) {
+        await trading.refreshData();
+        setLastRefreshed(new Date());
+        return { success: true, message: `✅ Order Placed! ID: ${data.data.nOrdNo}` };
+      }
+
+      const kotakMsg = data?.details?.errMsg || data?.details?.emsg || data?.error || "Order placement failed";
+      return { success: false, message: `❌ ${kotakMsg}` };
     } catch (err) {
-      warn('fetchLTPs error:', err);
+      return { success: false, message: err instanceof Error ? err.message : "Order failed" };
     }
-  }, []);
+  };
 
-  useEffect(() => {
-    if (!selectedExpiry) return;
-    const t  = setTimeout(() => fetchLTPs(), 300);
-    const id = setInterval(fetchLTPs, 2000);
-    return () => { clearTimeout(t); clearInterval(id); };
-  }, [selectedExpiry?.raw, fetchLTPs]);
-
-  // ─── Derived ──────────────────────────────────────────────────────────────
-
-  const atmStrike = spot ? roundToNearest50(spot) : null;
+  const totalPnL = trading.positions.reduce((sum: number, p: any) => sum + (p.pnl ?? 0), 0);
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="flex flex-col h-full bg-white text-gray-900">
+    <div className="flex flex-col bg-gray-100 overflow-hidden" style={{ height: "100vh" }}>
 
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-slate-200 bg-white shadow-sm flex-shrink-0">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-sm font-bold text-gray-800">NIFTY 50 Options</h2>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 px-2 py-1 bg-emerald-50 border border-emerald-200 rounded-lg">
-              <span className="text-xs text-gray-500">Spot:</span>
-              {spotLoading ? (
-                <span className="text-sm font-bold text-gray-400 animate-pulse">…</span>
-              ) : spot ? (
-                <span className="text-sm font-bold text-emerald-700">
-                  {spot.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                </span>
-              ) : (
-                <span className="text-sm text-gray-400">--</span>
-              )}
-              <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+      {/* ── HEADER ── */}
+      <header className="bg-white border-b border-gray-200 px-4 py-2 flex items-center justify-between gap-3 flex-shrink-0 shadow-sm">
+        <div className="flex items-center gap-3 flex-wrap">
+
+          {/* Status dot */}
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            <div className={`w-2.5 h-2.5 rounded-full ${trading.isConnected ? "bg-green-500 animate-pulse" : "bg-red-500"}`} />
+            <span className="text-sm font-bold text-gray-800 hidden sm:inline">
+              {trading.isConnected ? "Kotak Neo" : "Disconnected"}
+            </span>
+          </div>
+
+          {/* Balance chip */}
+          {trading.isConnected && (
+            <div className="flex items-center gap-1 px-2.5 py-1 bg-gray-50 rounded-lg border border-gray-200 text-sm font-bold text-gray-800 flex-shrink-0">
+              <Wallet size={12} className="text-gray-400" />
+              ₹{trading.balance.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
             </div>
-            {lastUpdated && (
-              <span className="text-xs text-gray-400 hidden md:inline">
-                {lastUpdated.toLocaleTimeString()}
-              </span>
-            )}
+          )}
+
+          {/* P&L chip */}
+          {trading.isConnected && trading.positions.length > 0 && (
+            <div className={`px-2.5 py-1 rounded-lg border text-sm font-bold flex-shrink-0 ${
+              totalPnL >= 0
+                ? "bg-green-50 border-green-200 text-green-700"
+                : "bg-red-50 border-red-200 text-red-700"
+            }`}>
+              {totalPnL >= 0 ? "+" : ""}₹{totalPnL.toFixed(2)}
+            </div>
+          )}
+
+          {/* Trading status badge + Deactivate button */}
+          {tradingEnabled !== null && (
+            <div className="flex items-center gap-1.5">
+
+              <div
+                className={`px-2.5 py-1 rounded-lg border text-sm font-bold flex items-center gap-1 flex-shrink-0 ${
+                  tradingEnabled
+                    ? "bg-green-50 border-green-200 text-green-700"
+                    : "bg-red-50 border-red-200 text-red-700"
+                }`}
+                title={tradingDisabledReason || "Trading is enabled"}
+              >
+                {tradingEnabled ? (
+                  <><CheckCircle size={14} /><span className="hidden sm:inline">Trading ON</span></>
+                ) : (
+                  <><AlertCircle size={14} /><span className="hidden sm:inline">Trading OFF</span></>
+                )}
+              </div>
+
+              {tradingEnabled && (
+                <DeactivateTradingButton onDeactivated={refreshTradingStatus} />
+              )}
+
+              {/* Rules tooltip */}
+              <div className="relative z-40">
+                <button
+                  onMouseEnter={() => setShowRules(true)}
+                  onMouseLeave={() => setShowRules(false)}
+                  onClick={() => setShowRules(!showRules)}
+                  className={`p-1.5 rounded-lg border transition ${
+                    tradingEnabled
+                      ? "bg-green-50 border-green-200 hover:bg-green-100"
+                      : "bg-red-50 border-red-200 hover:bg-red-100"
+                  }`}
+                  title="View trading rules"
+                >
+                  <Info size={14} className={tradingEnabled ? "text-green-600" : "text-red-600"} />
+                </button>
+
+                {showRules && (
+                  <div className="absolute top-full left-0 mt-2 w-80 bg-gray-900 text-white text-xs rounded-lg p-4 shadow-2xl z-50 border border-gray-700">
+                    <div className="flex items-start justify-between mb-3">
+                      <p className="font-semibold">📋 Trading Rules</p>
+                      <button onClick={() => setShowRules(false)} className="text-gray-400 hover:text-white text-lg leading-none">✕</button>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span><span>Only NIFTY Options (CE/PE)</span></div>
+                      <div className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span><span>Max 1 lot per order</span></div>
+                      <div className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span><span>Max 3 trades per day</span></div>
+                      <div className="flex items-start gap-2"><span className="text-green-400 mt-0.5">✓</span><span>No concurrent live trades</span></div>
+                    </div>
+                    <div className="mt-3 pt-3 border-t border-gray-700">
+                      <p className="text-gray-400 text-xs">Master switch (Rule -1) must be enabled to trade</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* NIFTY live price chip */}
+          {trading.isConnected && (
+            <div className="flex items-center gap-1 px-2.5 py-1 bg-blue-50 rounded-lg border border-blue-200 text-sm font-bold text-blue-700 flex-shrink-0">
+              <TrendingUp size={14} className="text-blue-600" />
+              <span className="hidden sm:inline">NIFTY:</span>
+              {niftyLTP !== null ? (
+                <span>₹{niftyLTP.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>
+              ) : (
+                <span className="text-gray-400">--</span>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {lastRefreshed && (
+            <span className="text-xs text-gray-400 hidden lg:inline">
+              {lastRefreshed.toLocaleTimeString()}
+            </span>
+          )}
+
+          {trading.isConnected && (
             <button
-              onClick={() => { fetchSpot(); if (selectedExpiry) loadChain(selectedExpiry, niftyLTP ?? spot ?? 24500); fetchLTPs(); }}
-              className="p-1 rounded hover:bg-gray-100 text-gray-500 transition-colors"
-              title="Refresh now"
+              onClick={handleManualRefresh}
+              disabled={trading.isLoading}
+              className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded transition"
+              title="Refresh data"
             >
-              <RefreshCw size={13} />
+              <RefreshCw size={14} className={trading.isLoading ? "animate-spin" : ""} />
             </button>
+          )}
+
+          <button
+            onClick={() => setShowResync((v) => !v)}
+            className={`text-xs font-medium px-2 py-1 border rounded transition ${
+              showResync
+                ? "bg-blue-50 border-blue-300 text-blue-700"
+                : "border-gray-200 text-gray-500 hover:text-blue-600"
+            }`}
+          >
+            ⟳ Sync
+          </button>
+
+          <button
+            onClick={() => trading.isConnected ? trading.disconnect() : trading.connect()}
+            disabled={trading.isLoading}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition disabled:opacity-50 ${
+              trading.isConnected
+                ? "bg-red-50 text-red-700 border border-red-200 hover:bg-red-100"
+                : "bg-green-50 text-green-700 border border-green-200 hover:bg-green-100"
+            }`}
+          >
+            {trading.isLoading
+              ? <Loader2 size={12} className="animate-spin" />
+              : trading.isConnected
+                ? <WifiOff size={12} />
+                : <Wifi size={12} />}
+            {trading.isConnected ? "Disconnect" : "Connect"}
+          </button>
+        </div>
+      </header>
+
+      {/* Collapsible Resync Panel */}
+      {showResync && (
+        <div className="bg-white border-b border-gray-200 px-4 py-3 flex-shrink-0">
+          <ResyncButton />
+        </div>
+      )}
+
+      {/* Session Expired Banner */}
+      {trading.sessionExpired && (
+        <div className="bg-orange-50 border-b border-orange-300 px-4 py-2.5 flex items-center gap-2 flex-shrink-0">
+          <AlertTriangle size={14} className="text-orange-600 flex-shrink-0" />
+          <p className="text-xs text-orange-800 font-semibold flex-1">
+            Session expired — please login again to continue trading.
+          </p>
+          <button
+            onClick={() => onSessionExpired?.()}
+            className="text-xs bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded font-bold flex-shrink-0"
+          >
+            Login Again
+          </button>
+        </div>
+      )}
+
+      {/* Error Banner */}
+      {trading.error && !trading.sessionExpired && (
+        <div className="bg-red-50 border-b border-red-200 px-4 py-2 flex items-center gap-2 flex-shrink-0">
+          <AlertTriangle size={13} className="text-red-600 flex-shrink-0" />
+          <p className="text-xs text-red-700 flex-1 truncate">{trading.error}</p>
+          <button
+            onClick={handleManualRefresh}
+            className="text-xs text-red-600 underline hover:text-red-800 flex-shrink-0"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* ── MAIN BODY ── */}
+      <div className="flex flex-1 overflow-hidden min-h-0">
+
+        {/* LEFT: Watchlist */}
+        <div className="w-72 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
+          <div className="px-3 py-2 border-b border-gray-100 bg-gray-50 flex-shrink-0">
+            <h2 className="text-xs font-bold text-gray-600 uppercase tracking-wider">Watchlist</h2>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <Watchlist
+              onSelectScrip={handleWatchlistSelect}
+              niftyLTP={niftyLTP}
+              onLTPUpdate={handleLTPUpdate}
+            />
           </div>
         </div>
 
-        {/* Expiry tabs */}
-        <div className="flex gap-1 overflow-x-auto scrollbar-hide">
-          {expiries.map(exp => (
+        {/* MIDDLE: Order Form */}
+        <div className="w-72 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col overflow-hidden">
+          <div className="px-3 py-2 border-b border-gray-100 bg-gray-50 flex-shrink-0">
+            <h2 className="text-xs font-bold text-gray-600 uppercase tracking-wider">Place Order</h2>
+          </div>
+          <div className="flex-1 overflow-auto">
+            <OrderForm
+              selectedScrip={selectedScrip}
+              defaultSide={defaultSide}
+              isConnected={trading.isConnected}
+              isLoading={trading.isLoading}
+              currentLTP={selectedScripLTP}
+              isTradingEnabled={tradingEnabled ?? false}
+              onPlaceOrder={handlePlaceOrder}
+              onClear={() => {
+                setSelectedScrip(null);
+                setSelectedScripLTP(undefined);
+              }}
+            />
+          </div>
+        </div>
+
+        {/* RIGHT: Tabs */}
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0 bg-white">
+          <div className="flex border-b border-gray-200 flex-shrink-0 bg-gray-50">
+
             <button
-              key={exp.raw}
-              onClick={() => setSelectedExpiry(exp)}
-              className={`px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap transition-all ${
-                selectedExpiry?.raw === exp.raw
-                  ? 'bg-blue-600 text-white shadow'
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+              onClick={() => setBottomTab("positions")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                bottomTab === "positions"
+                  ? "border-blue-500 text-blue-600 bg-white"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
               }`}
             >
-              {exp.label}
+              <TrendingUp size={12} />
+              Positions
+              {trading.positions.length > 0 && (
+                <span className="ml-1 bg-blue-100 text-blue-700 text-xs px-1.5 rounded-full font-bold">
+                  {trading.positions.length}
+                </span>
+              )}
             </button>
-          ))}
+
+            <button
+              onClick={() => setBottomTab("orders")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                bottomTab === "orders"
+                  ? "border-blue-500 text-blue-600 bg-white"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              <LayoutList size={12} />
+              Orders
+              {trading.orders.length > 0 && (
+                <span className="ml-1 bg-gray-200 text-gray-600 text-xs px-1.5 rounded-full font-bold">
+                  {trading.orders.length}
+                </span>
+              )}
+              {(() => {
+                const buyFilled = trading.orders.filter((o) => {
+                  const s = (o.status || "").toLowerCase();
+                  return (s.includes("complete") || s === "traded") && o.side?.toUpperCase() === "BUY";
+                }).length;
+                return buyFilled > 0 ? (
+                  <span className="ml-0.5 bg-green-100 text-green-700 text-xs px-1.5 rounded-full font-bold">
+                    B✓{buyFilled}
+                  </span>
+                ) : null;
+              })()}
+              {(() => {
+                const sellFilled = trading.orders.filter((o) => {
+                  const s = (o.status || "").toLowerCase();
+                  return (s.includes("complete") || s === "traded") && o.side?.toUpperCase() === "SELL";
+                }).length;
+                return sellFilled > 0 ? (
+                  <span className="ml-0.5 bg-red-100 text-red-600 text-xs px-1.5 rounded-full font-bold">
+                    S✓{sellFilled}
+                  </span>
+                ) : null;
+              })()}
+            </button>
+
+            <button
+              onClick={() => setBottomTab("chain")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                bottomTab === "chain"
+                  ? "border-blue-500 text-blue-600 bg-white"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              📈 Options Chain
+            </button>
+
+            <button
+              onClick={() => setBottomTab("alerts")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                bottomTab === "alerts"
+                  ? "border-blue-500 text-blue-600 bg-white"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              🔔 Alerts
+            </button>
+
+            <button
+              onClick={() => setBottomTab("ai")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                bottomTab === "ai"
+                  ? "border-blue-500 text-blue-600 bg-white"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              🧠 AI Analysis
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-hidden min-h-0">
+            {bottomTab === "positions" ? (
+              <PositionsTable
+                positions={trading.positions as any}
+                isLoading={trading.isLoading}
+                onExit={async (symbol) => {
+                  await trading.exitPosition(symbol);
+                  await trading.refreshData();
+                  setLastRefreshed(new Date());
+                }}
+                onRefresh={handleManualRefresh}
+              />
+            ) : bottomTab === "orders" ? (
+              <OrdersTable
+                orders={trading.orders as any}
+                isLoading={trading.isLoading}
+                onCancel={async (id) => {
+                  await trading.cancelOrder(id);
+                  await trading.refreshData();
+                  setLastRefreshed(new Date());
+                }}
+                onRefresh={handleManualRefresh}
+              />
+            ) : bottomTab === "chain" ? (
+              <div className="p-4 overflow-auto h-full">
+                <OptionsChain onSelectScrip={handleWatchlistSelect} niftyLTP={niftyLTP} />
+              </div>
+            ) : bottomTab === "alerts" ? (
+              <PriceAlerts currentPrice={niftyLTP} />
+            ) : bottomTab === "ai" ? (
+              <div className="h-full overflow-hidden">
+                <AIAnalysisPanel niftyLTP={niftyLTP} isConnected={trading.isConnected} />
+              </div>
+            ) : <div />}
+          </div>
         </div>
-      </div>
-
-      {/* Info bar */}
-      <div className="px-4 py-1.5 bg-gray-50 border-b border-slate-200 flex gap-4 text-xs flex-shrink-0">
-        <span className="text-gray-500">Lot: <b className="text-gray-800">{lotSize}</b></span>
-        {atmStrike && (
-          <span className="text-gray-500">ATM: <b className="text-blue-700">{atmStrike.toLocaleString('en-IN')}</b></span>
-        )}
-        {selectedExpiry && (
-          <span className="text-gray-500">Expiry: <b className="text-gray-800">{selectedExpiry.label}</b></span>
-        )}
-        <span className="text-gray-400 ml-auto">2s updates · ±5 strikes</span>
-      </div>
-
-      {/* Column headers */}
-      <div className="px-3 py-1.5 bg-gray-100 border-b border-slate-200 flex-shrink-0">
-        <div
-          style={{ gridTemplateColumns: 'repeat(13,minmax(0,1fr))' }}
-          className="grid gap-1 text-xs font-semibold text-gray-500 uppercase tracking-wide text-center"
-        >
-          <div className="col-span-1" />
-          <div className="col-span-2">CE LTP</div>
-          <div className="col-span-2">CALL</div>
-          <div className="col-span-3">Strike</div>
-          <div className="col-span-2">PUT</div>
-          <div className="col-span-2">PE LTP</div>
-          <div className="col-span-1" />
-        </div>
-      </div>
-
-      {/* Chain rows */}
-      <div className="flex-1 overflow-y-auto">
-        {chainLoading ? (
-          <div className="flex items-center justify-center h-32">
-            <div className="animate-spin rounded-full h-6 w-6 border-2 border-blue-600 border-t-transparent" />
-          </div>
-        ) : chain.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-32 text-gray-400 text-sm gap-2">
-            <span>{selectedExpiry ? `No data for ${selectedExpiry.label}` : 'Select an expiry'}</span>
-            {selectedExpiry && (
-              <button
-                onClick={() => loadChain(selectedExpiry, niftyLTP ?? spot ?? 24500)}
-                className="text-xs text-blue-500 hover:underline flex items-center gap-1"
-              >
-                <RefreshCw size={11} /> Retry
-              </button>
-            )}
-          </div>
-        ) : (
-          <div>
-            {chain.map(row => {
-              const isAtm         = atmStrike !== null && row.strike === atmStrike;
-              const ceInWatchlist = row.ce ? watchlistSet.has(row.ce.scrip.p_trd_symbol) : false;
-              const peInWatchlist = row.pe ? watchlistSet.has(row.pe.scrip.p_trd_symbol) : false;
-
-              return (
-                <div
-                  key={row.strike}
-                  ref={isAtm ? atmRowRef : null}
-                  style={{ gridTemplateColumns: 'repeat(13,minmax(0,1fr))' }}
-                  className={`grid gap-1 px-3 py-1 text-xs border-b transition-colors ${
-                    isAtm ? 'bg-blue-50 border-blue-200' : 'border-gray-100 hover:bg-gray-50'
-                  }`}
-                >
-                  {/* ★ CE */}
-                  <div className="col-span-1 flex items-center justify-center">
-                    {row.ce && (
-                      <button onClick={() => toggleWatchlist(row.ce!.scrip)} className="transition-transform hover:scale-125">
-                        <Star size={11} className={ceInWatchlist ? 'fill-yellow-400 text-yellow-400' : 'text-gray-300 hover:text-yellow-400'} />
-                      </button>
-                    )}
-                  </div>
-
-                  {/* CE LTP */}
-                  <div className="col-span-2 flex items-center justify-center font-bold text-orange-600">
-                    {row.ce
-                      ? row.ce.ltpLoading
-                        ? <span className="text-gray-300 animate-pulse">…</span>
-                        : row.ce.ltp > 0 ? row.ce.ltp.toFixed(2) : <span className="text-gray-300">--</span>
-                      : <span className="text-gray-200">—</span>}
-                  </div>
-
-                  {/* CE B/S */}
-                  <div className="col-span-2 flex items-center justify-center gap-0.5">
-                    {row.ce && (
-                      <>
-                        <button onClick={() => onSelectScrip(row.ce!.scrip, 'BUY')}  className="px-1.5 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-xs">B</button>
-                        <button onClick={() => onSelectScrip(row.ce!.scrip, 'SELL')} className="px-1.5 py-0.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded text-xs">S</button>
-                      </>
-                    )}
-                  </div>
-
-                  {/* Strike */}
-                  <div className={`col-span-3 flex flex-col items-center justify-center font-bold ${isAtm ? 'text-blue-700' : 'text-gray-700'}`}>
-                    <span>{row.strike.toLocaleString('en-IN')}</span>
-                    {isAtm && <span className="text-xs text-blue-500 font-normal leading-none">ATM</span>}
-                  </div>
-
-                  {/* PE B/S */}
-                  <div className="col-span-2 flex items-center justify-center gap-0.5">
-                    {row.pe && (
-                      <>
-                        <button onClick={() => onSelectScrip(row.pe!.scrip, 'BUY')}  className="px-1.5 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded text-xs">B</button>
-                        <button onClick={() => onSelectScrip(row.pe!.scrip, 'SELL')} className="px-1.5 py-0.5 bg-red-600 hover:bg-red-700 text-white font-bold rounded text-xs">S</button>
-                      </>
-                    )}
-                  </div>
-
-                  {/* PE LTP */}
-                  <div className="col-span-2 flex items-center justify-center font-bold text-blue-600">
-                    {row.pe
-                      ? row.pe.ltpLoading
-                        ? <span className="text-gray-300 animate-pulse">…</span>
-                        : row.pe.ltp > 0 ? row.pe.ltp.toFixed(2) : <span className="text-gray-300">--</span>
-                      : <span className="text-gray-200">—</span>}
-                  </div>
-
-                  {/* ★ PE */}
-                  <div className="col-span-1 flex items-center justify-center">
-                    {row.pe && (
-                      <button onClick={() => toggleWatchlist(row.pe!.scrip)} className="transition-transform hover:scale-125">
-                        <Star size={11} className={peInWatchlist ? 'fill-yellow-400 text-yellow-400' : 'text-gray-300 hover:text-yellow-400'} />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
       </div>
     </div>
   );

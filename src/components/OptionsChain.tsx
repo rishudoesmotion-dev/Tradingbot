@@ -8,11 +8,11 @@ import { RefreshCw, Star } from 'lucide-react';
 
 const WATCHLIST_KEY = 'scrip_watchlist';
 
-const DEBUG = true; // forced on — disable once strike issue is resolved
+const DEBUG = true;
 const log  = (...a: any[]) => console.log('[OC]', ...a);
 const warn = (...a: any[]) => console.warn('[OC]', ...a);
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface OptionLeg {
   scrip: ScripResult;
@@ -28,8 +28,11 @@ interface OptionChainRow {
 
 interface ExpiryInfo {
   label: string;
+  /** Raw string used as ilike pattern fallback – two variants tried */
   raw: string;
   expiryTs?: number;
+  /** TRUE = weekly (e.g. NIFTY25APR7xxxCE), FALSE = monthly (NIFTY25APR24xxxCE) */
+  isWeekly?: boolean;
 }
 
 interface OptionsChainProps {
@@ -64,10 +67,44 @@ function toScrip(row: any): ScripResult {
   };
 }
 
-// ── Strike / option-type extraction ───────────────────────────────────────────
-// Reads from dedicated DB columns when available (most reliable).
-// Falls back to parsing p_trd_symbol only if columns are missing.
-// Range guard (10,000–35,000) rejects any date-digit false-positives.
+const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+
+/**
+ * Build ALL possible ilike pattern variants for a given expiry date.
+ *
+ * NSE FO naming conventions observed in practice:
+ *
+ *  Weekly  : NIFTY25APR7200CE   (day WITHOUT leading zero)
+ *  Weekly  : NIFTY25APR07200CE  (day WITH leading zero – some brokers pad it)
+ *  Monthly : NIFTY25APR24200CE  (full 2-digit year suffix before strike – legacy)
+ *  Monthly : NIFTY25APR2024200CE (4-digit year – rare, but seen)
+ *
+ * We build patterns that cover all these variants so the ilike fallback
+ * never silently misses rows.
+ */
+function buildIlikePatterns(expiryTs: number): string[] {
+  const d   = new Date(expiryTs * 1000);
+  const yy  = String(d.getUTCFullYear()).slice(2);   // "25"
+  const mon = MONTHS[d.getUTCMonth()];               // "APR"
+  const dd  = d.getUTCDate();                        // 7  (no padding)
+  const ddP = String(dd).padStart(2, '0');           // "07"
+
+  return [
+    // Weekly without padding:  NIFTY25APR7%
+    `NIFTY${yy}${mon}${dd}%`,
+    // Weekly with padding:     NIFTY25APR07%
+    `NIFTY${yy}${mon}${ddP}%`,
+    // Monthly (last Thursday): NIFTY25APR%  ← broad, filtered by expiryTs later
+    // We still include a narrow one so it can match monthly symbols:
+    `NIFTY${yy}${mon}24%`,   // e.g. NIFTY25APR24xxxCE  (day=24 last Thursday)
+  ];
+}
+
+/**
+ * Extract strike + option type from a DB row.
+ * Priority: dedicated DB columns → p_trd_symbol regex.
+ * Range guard: 1,000–99,999 to cover all current + future NIFTY levels.
+ */
 function getStrikeAndType(
   row: any,
   strikeCol: string | null,
@@ -76,24 +113,57 @@ function getStrikeAndType(
   let strike: number | null  = null;
   let optType: string | null = null;
 
-  // 1. Try dedicated DB columns first
+  // 1. Dedicated DB columns
   if (strikeCol) {
     const raw = parseFloat(String(row[strikeCol] ?? 0));
-    if (raw >= 10_000 && raw <= 35_000) strike = raw;
+    if (raw >= 1_000 && raw <= 99_999) strike = raw;
   }
   if (optTypeCol) {
     const val = String(row[optTypeCol] ?? '').toUpperCase().trim();
     if (val === 'CE' || val === 'PE') optType = val;
   }
 
-  // 2. Fall back to parsing p_trd_symbol
+  // 2. Parse p_trd_symbol as fallback
+  // Handles ALL known NSE FO naming formats:
+  //   Format A (alpha month): NIFTY25APR722500CE, NIFTY25APR2422500PE
+  //   Format B (numeric YYMMDD): NIFTY2640722900CE  (YY=26, MM=04, DD=07, strike=22900)
+  //   Format C (numeric YYMDD): NIFTY264722900CE   (YY=26, M=4, DD=07)
   if (!strike || !optType) {
     const sym = (row.p_trd_symbol || '').toUpperCase();
-    const m   = sym.match(/(\d+)(CE|PE)$/);
-    if (m) {
-      const parsed = parseInt(m[1], 10);
-      if (!strike && parsed >= 10_000 && parsed <= 35_000) strike = parsed;
-      if (!optType) optType = m[2];
+
+    // Strip the known prefix "NIFTY" then greedily try to find strike+type at the end
+    // Strategy: the option type is always the last 2 chars (CE or PE),
+    // and the strike is the numeric block immediately before it.
+    // We try different prefix lengths (4–7 chars for date encoding) to isolate the strike.
+    const typeMatch = sym.match(/(CE|PE)$/);
+    if (typeMatch) {
+      if (!optType) optType = typeMatch[1];
+      // Everything between "NIFTY" and "CE/PE": e.g. "2640717200" from "NIFTY2640717200CE"
+      const body = sym.replace(/^NIFTY/, '').replace(/(CE|PE)$/, '');
+      // body is all digits. Date prefix is 5 or 6 digits (YYMMDD=6, YYMDD=5, YYDDD=5).
+      // Strike is the remaining suffix — try suffix lengths 4,5,6 and pick
+      // the one closest to a known NIFTY range (15000–35000).
+      const candidates: number[] = [];
+      for (let suffixLen = 4; suffixLen <= 6; suffixLen++) {
+        if (body.length > suffixLen) {
+          const s = parseInt(body.slice(-suffixLen), 10);
+          if (s >= 10_000 && s <= 35_000) candidates.push(s);
+        }
+      }
+      // Also try alpha-month format as a final catch
+      const alphaMatch = sym.match(/[A-Z]{3}\d{0,4}?(\d{4,6})(CE|PE)$/);
+      if (alphaMatch) {
+        const s = parseInt(alphaMatch[1], 10);
+        if (s >= 10_000 && s <= 35_000) candidates.push(s);
+      }
+
+      if (!strike && candidates.length > 0) {
+        // Pick candidate closest to 22500 (rough midpoint of typical NIFTY range)
+        // This handles ambiguity when multiple suffix lengths are valid
+        strike = candidates.reduce((best, c) =>
+          Math.abs(c - 22_500) < Math.abs(best - 22_500) ? c : best
+        );
+      }
     }
   }
 
@@ -101,7 +171,125 @@ function getStrikeAndType(
   return { strike, optType };
 }
 
-const MONTHS = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
+/**
+ * Fetch scrip_master rows for a given expiry using a multi-strategy approach:
+ *
+ *  Strategy A: exact timestamp match  (fastest, works when ts is stored correctly)
+ *  Strategy B: ±24 h timestamp window (handles IST/UTC midnight offset issues)
+ *  Strategy C: ilike on all symbol variants (handles any timestamp discrepancy)
+ *
+ * Returns as soon as any strategy yields rows.
+ */
+async function fetchChainRows(expiry: ExpiryInfo): Promise<any[]> {
+  const ts = expiry.expiryTs;
+
+  // ── Strategy A: exact ts ──────────────────────────────────────────────────
+  if (ts !== undefined) {
+    const { data, error } = await supabase
+      .from('scrip_master')
+      .select('*')
+      .eq('p_symbol', 'NIFTY')
+      .eq('segment', 'nse_fo')
+      .eq('l_expiry_date', ts);
+
+    log(`[fetchChainRows] Strategy A (exact ts=${ts}): ${data?.length ?? 0} rows, error:`, error);
+    if (!error && data && data.length > 0) return data;
+  }
+
+  // ── Strategy B: ±24 h window around ts ────────────────────────────────────
+  if (ts !== undefined) {
+    const lo = ts - 86_400;   // -24 h
+    const hi = ts + 86_400;   // +24 h
+
+    const { data, error } = await supabase
+      .from('scrip_master')
+      .select('*')
+      .eq('p_symbol', 'NIFTY')
+      .eq('segment', 'nse_fo')
+      .gte('l_expiry_date', lo)
+      .lte('l_expiry_date', hi);
+
+    log(`[fetchChainRows] Strategy B (±24h window ${lo}–${hi}): ${data?.length ?? 0} rows, error:`, error);
+
+    if (!error && data && data.length > 0) {
+      // If multiple distinct timestamps returned, pick the one closest to ts
+      const tsCounts = new Map<number, number>();
+      data.forEach((r: any) => tsCounts.set(r.l_expiry_date, (tsCounts.get(r.l_expiry_date) ?? 0) + 1));
+      log('[fetchChainRows] Timestamps in window:', Array.from(tsCounts.entries()));
+
+      let bestTs = ts;
+      let bestDiff = Infinity;
+      tsCounts.forEach((_, candidateTs) => {
+        const diff = Math.abs(candidateTs - ts);
+        if (diff < bestDiff) { bestDiff = diff; bestTs = candidateTs; }
+      });
+
+      const filtered = data.filter((r: any) => r.l_expiry_date === bestTs);
+      log(`[fetchChainRows] Strategy B winner ts=${bestTs}, rows=${filtered.length}`);
+      if (filtered.length > 0) return filtered;
+    }
+  }
+
+  // ── Strategy C: ilike on symbol variants ──────────────────────────────────
+  const patterns = ts !== undefined
+    ? buildIlikePatterns(ts)
+    : [`NIFTY${expiry.raw}%`]; // legacy fallback when no ts
+
+  log('[fetchChainRows] Strategy C ilike patterns:', patterns);
+
+  for (const pattern of patterns) {
+    const { data, error } = await supabase
+      .from('scrip_master')
+      .select('*')
+      .eq('p_symbol', 'NIFTY')
+      .eq('segment', 'nse_fo')
+      .ilike('p_trd_symbol', pattern);
+
+    log(`[fetchChainRows] Strategy C pattern "${pattern}": ${data?.length ?? 0} rows, error:`, error);
+    if (!error && data && data.length > 0) return data;
+  }
+
+  // ── Strategy D: broad symbol prefix + manual ts filter ────────────────────
+  // Last resort: pull all NIFTY FO rows near the date and filter client-side
+  if (ts !== undefined) {
+    const d   = new Date(ts * 1000);
+    const yy  = String(d.getUTCFullYear()).slice(2);
+    const mon = MONTHS[d.getUTCMonth()];
+    const broadPattern = `NIFTY${yy}${mon}%`;
+
+    const { data, error } = await supabase
+      .from('scrip_master')
+      .select('*')
+      .eq('p_symbol', 'NIFTY')
+      .eq('segment', 'nse_fo')
+      .ilike('p_trd_symbol', broadPattern);
+
+    log(`[fetchChainRows] Strategy D broad "${broadPattern}": ${data?.length ?? 0} rows, error:`, error);
+
+    if (!error && data && data.length > 0) {
+      // Group by l_expiry_date and return the group whose date is closest to ts
+      const groups = new Map<number, any[]>();
+      data.forEach((r: any) => {
+        const g = groups.get(r.l_expiry_date) ?? [];
+        g.push(r);
+        groups.set(r.l_expiry_date, g);
+      });
+
+      let bestRows: any[] = [];
+      let bestDiff = Infinity;
+      groups.forEach((rows, candidateTs) => {
+        const diff = Math.abs(candidateTs - ts);
+        if (diff < bestDiff) { bestDiff = diff; bestRows = rows; }
+      });
+
+      log(`[fetchChainRows] Strategy D best group size=${bestRows.length}, diff=${bestDiff}s`);
+      if (bestRows.length > 0) return bestRows;
+    }
+  }
+
+  warn('[fetchChainRows] All strategies exhausted — no rows found');
+  return [];
+}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -115,6 +303,7 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
   const [lastUpdated,    setLastUpdated]    = useState<Date | null>(null);
   const [lotSize,        setLotSize]        = useState(65);
   const [watchlistSet,   setWatchlistSet]   = useState<Set<string>>(new Set());
+  const [fetchStrategy,  setFetchStrategy]  = useState<string>('');  // debug display
 
   const chainRef   = useRef<OptionChainRow[]>([]);
   chainRef.current = chain;
@@ -167,13 +356,12 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
 
         log('=== EXPIRY QUERY ===');
         log('Row count:', data?.length, '| Error:', error);
-        log('Unique p_symbol:', [...new Set(data?.map((r: any) => r.p_symbol))]);
         log('First 10 p_trd_symbols:', data?.slice(0, 10).map((r: any) => r.p_trd_symbol));
 
         const makeFallback = (): ExpiryInfo[] => [
-          { label: '24 MAR', raw: '25MAR24' },
-          { label: '27 MAR', raw: '25MAR27' },
-          { label: '03 APR', raw: '25APR03' },
+          { label: '07 APR', raw: '25APR07', expiryTs: undefined },
+          { label: '13 APR', raw: '25APR13', expiryTs: undefined },
+          { label: '24 APR', raw: '25APR24', expiryTs: undefined },
         ];
 
         if (error || !data?.length) {
@@ -184,21 +372,34 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
           return;
         }
 
-        const seen = new Map<number, ExpiryInfo>();
+        // Collect unique timestamps and their row counts
+        // A timestamp with many CE+PE rows is likely a valid expiry
+        const tsCounts = new Map<number, number>();
         data.forEach((row: any) => {
-          const ts: number = row.l_expiry_date;
-          if (!ts || seen.has(ts)) return;
-          const d     = new Date(ts * 1000);
-          const dd    = String(d.getUTCDate()).padStart(2, '0');
-          const mon   = MONTHS[d.getUTCMonth()];
+          if (row.l_expiry_date) {
+            tsCounts.set(row.l_expiry_date, (tsCounts.get(row.l_expiry_date) ?? 0) + 1);
+          }
+        });
+
+        log('Timestamp counts:', Array.from(tsCounts.entries()).map(([ts, n]) => `${ts}=${n}`));
+
+        // Keep only timestamps with at least 2 rows (avoids noise)
+        const seen = new Map<number, ExpiryInfo>();
+        tsCounts.forEach((count, ts) => {
+          if (count < 2 || seen.has(ts)) return;
+          if (ts < nowTs) return;
+
+          const d   = new Date(ts * 1000);
+          const dd  = String(d.getUTCDate()).padStart(2, '0');
+          const mon = MONTHS[d.getUTCMonth()];
           const label = `${dd} ${mon}`;
           const yy    = String(d.getUTCFullYear()).slice(2);
-          const ddR   = String(d.getUTCDate()).padStart(2, '0');
-          const raw   = `${yy}${mon}${ddR}`;
+          const raw   = `${yy}${mon}${dd}`;   // e.g. "25APR07"
+
           seen.set(ts, { label, raw, expiryTs: ts });
         });
 
-        const list = Array.from(seen.values()).filter(e => (e.expiryTs ?? 0) >= nowTs);
+        const list = Array.from(seen.values()).sort((a, b) => (a.expiryTs ?? 0) - (b.expiryTs ?? 0));
         log('Expiry list:', list.map(e => `${e.label} (ts=${e.expiryTs})`));
 
         if (list.length) {
@@ -253,10 +454,11 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
           const q      = res.data[i] as any;
           const ltp    = parseFloat(String(q.ltp ?? q.ltP ?? q.lp ?? 0));
           const sym    = batch[i]?.p_trd_symbol || '';
-          const m      = sym.toUpperCase().match(/(\d+)(CE|PE)$/);
+          // Updated regex: handles weekly (no padding) + monthly
+          const m      = sym.toUpperCase().match(/(\d{5,6})(CE|PE)$/);
           if (m && ltp > 0) {
             const parsed = parseInt(m[1], 10);
-            if (parsed >= 10_000 && parsed <= 35_000) {
+            if (parsed >= 1_000 && parsed <= 99_999) {
               const approxSpot = parsed + ltp;
               if (approxSpot > bestSpot) bestSpot = approxSpot;
             }
@@ -281,65 +483,43 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
 
   const loadChain = useCallback(async (expiry: ExpiryInfo, atmSpot: number) => {
     setChainLoading(true);
+    setFetchStrategy('');
     try {
       const atm = roundToNearest50(atmSpot);
       log('=== LOAD CHAIN ===');
       log(`Expiry: ${expiry.label} | raw: ${expiry.raw} | expiryTs: ${expiry.expiryTs} | ATM: ${atm}`);
 
-      // ── Fetch rows ──────────────────────────────────────────────────────
-      let rows: any[] | null = null;
-      let fetchError: any    = null;
+      // ── Fetch rows via multi-strategy helper ────────────────────────────
+      const rows = await fetchChainRows(expiry);
 
-      if (expiry.expiryTs !== undefined) {
-        const res = await supabase
-          .from('scrip_master')
-          .select('*')
-          .eq('p_symbol', 'NIFTY')
-          .eq('segment', 'nse_fo')
-          .eq('l_expiry_date', expiry.expiryTs);
-        rows       = res.data;
-        fetchError = res.error;
-      } else {
-        const res = await supabase
-          .from('scrip_master')
-          .select('*')
-          .eq('p_symbol', 'NIFTY')
-          .ilike('p_trd_symbol', `NIFTY${expiry.raw}%`)
-          .eq('segment', 'nse_fo');
-        rows       = res.data;
-        fetchError = res.error;
-      }
-
-      log(`Rows fetched: ${rows?.length ?? 0} | Error:`, fetchError);
-
-      if (fetchError || !rows?.length) {
-        warn('No chain rows — aborting');
+      log(`Total rows after all strategies: ${rows.length}`);
+      if (!rows.length) {
+        warn('No chain rows found by any strategy — aborting');
+        setChain([]);
         setChainLoading(false);
         return;
       }
 
       // ── Inspect DB schema ───────────────────────────────────────────────
-      const firstRow    = rows[0];
-      const allCols     = Object.keys(firstRow);
-      const strikeCol   = allCols.find(c => c === 'l_strike_price') ??
-                          allCols.find(c => c === 'strike_price')    ??
-                          allCols.find(c => c.toLowerCase().includes('strike')) ??
-                          null;
-      const optTypeCol  = allCols.find(c => c === 'p_option_type') ??
-                          allCols.find(c => c === 'option_type')    ??
-                          allCols.find(c => c.toLowerCase().includes('option')) ??
-                          null;
+      const firstRow   = rows[0];
+      const allCols    = Object.keys(firstRow);
+      const strikeCol  = allCols.find(c => c === 'l_strike_price') ??
+                         allCols.find(c => c === 'strike_price')    ??
+                         allCols.find(c => c.toLowerCase().includes('strike')) ??
+                         null;
+      const optTypeCol = allCols.find(c => c === 'p_option_type') ??
+                         allCols.find(c => c === 'option_type')    ??
+                         allCols.find(c => c.toLowerCase().includes('option')) ??
+                         null;
 
-      log('All columns:', allCols);
-      log(`Strike col detected: "${strikeCol}" | OptType col detected: "${optTypeCol}"`);
-      log('First 5 raw rows:', rows.slice(0, 5));
-      log('Sample p_trd_symbols:', rows.slice(0, 10).map((r: any) => r.p_trd_symbol));
+      log('Strike col:', strikeCol, '| OptType col:', optTypeCol);
+      log('Sample p_trd_symbols:', rows.slice(0, 8).map((r: any) => r.p_trd_symbol));
 
       // ── Lot size ────────────────────────────────────────────────────────
       const lotRow = rows.find((r: any) => (r.l_lot_size || 0) > 0);
       if (lotRow) setLotSize(lotRow.l_lot_size);
 
-      // ── Collect all valid strikes ───────────────────────────────────────
+      // ── Collect valid strikes ───────────────────────────────────────────
       const allStrikeSet = new Set<number>();
       rows.forEach((row: any) => {
         const result = getStrikeAndType(row, strikeCol, optTypeCol);
@@ -350,18 +530,21 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
       log(`Valid strikes (${allStrikes.length}):`, allStrikes);
 
       if (!allStrikes.length) {
-        warn('❌ Zero valid strikes extracted! Check logs above.');
+        warn('Zero valid strikes extracted! Raw sample:', rows.slice(0, 3));
+        setChain([]);
         setChainLoading(false);
         return;
       }
 
-      let atmIdx = allStrikes.findIndex(s => s >= atm);
-      if (atmIdx < 0) atmIdx = allStrikes.length - 1;
+      // ATM index — find closest strike to spot
+      let atmIdx = allStrikes.reduce((bestIdx, s, idx) => {
+        return Math.abs(s - atm) < Math.abs(allStrikes[bestIdx] - atm) ? idx : bestIdx;
+      }, 0);
 
       const start          = Math.max(0, atmIdx - 5);
       const end            = Math.min(allStrikes.length - 1, atmIdx + 5);
       const visibleStrikes = new Set(allStrikes.slice(start, end + 1));
-      log(`ATM idx: ${atmIdx} | Visible strikes:`, Array.from(visibleStrikes));
+      log(`ATM idx: ${atmIdx} (strike=${allStrikes[atmIdx]}) | Visible:`, Array.from(visibleStrikes));
 
       // ── Build strike map ────────────────────────────────────────────────
       const strikeMap = new Map<number, { ce?: any; pe?: any }>();
@@ -392,6 +575,7 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
       setChain(newChain);
     } catch (err) {
       console.error('[OptionsChain] loadChain:', err);
+      setChain([]);
     } finally {
       setChainLoading(false);
     }
@@ -522,7 +706,7 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
               </span>
             )}
             <button
-              onClick={() => { fetchSpot(); fetchLTPs(); }}
+              onClick={() => { fetchSpot(); if (selectedExpiry) loadChain(selectedExpiry, niftyLTP ?? spot ?? 24500); fetchLTPs(); }}
               className="p-1 rounded hover:bg-gray-100 text-gray-500 transition-colors"
               title="Refresh now"
             >
@@ -584,8 +768,16 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
             <div className="animate-spin rounded-full h-6 w-6 border-2 border-blue-600 border-t-transparent" />
           </div>
         ) : chain.length === 0 ? (
-          <div className="flex items-center justify-center h-32 text-gray-400 text-sm">
-            {selectedExpiry ? `No data for ${selectedExpiry.label}` : 'Select an expiry'}
+          <div className="flex flex-col items-center justify-center h-32 text-gray-400 text-sm gap-2">
+            <span>{selectedExpiry ? `No data for ${selectedExpiry.label}` : 'Select an expiry'}</span>
+            {selectedExpiry && (
+              <button
+                onClick={() => loadChain(selectedExpiry, niftyLTP ?? spot ?? 24500)}
+                className="text-xs text-blue-500 hover:underline flex items-center gap-1"
+              >
+                <RefreshCw size={11} /> Retry
+              </button>
+            )}
           </div>
         ) : (
           <div>

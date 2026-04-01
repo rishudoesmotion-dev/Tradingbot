@@ -9,6 +9,7 @@ import { ScripResult } from "@/lib/services/ScripSearchService";
 import { isMarketOpen } from "@/lib/utils/marketHours";
 import { RiskManager } from "@/lib/risk/RiskManager";
 import { getTradesService } from "@/lib/services/TradesService";
+import { supabase } from "@/lib/supabase/client";
 import {
   getMarketDataStreamService,
   PriceUpdate,
@@ -483,6 +484,7 @@ export default function TradingPanel({
         const payload = {
           action: "placeOrder",
           tradingToken, tradingSid, baseUrl, consumerKey,
+          userId: (await supabase.auth.getUser()).data.user?.id ?? "",
           am: "NO", dq: "0", es: o.exchSeg, mp: "0",
           pc: o.productType, pf: "N",
           pr: String(o.orderType === "MARKET" || o.orderType === "SL-M" ? 0 : o.price),

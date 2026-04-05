@@ -310,7 +310,7 @@ export async function POST(request: NextRequest) {
     });
 
     switch (action) {
-      case 'placeOrder': {
+      case 'placeOrderblocking': {
         // ── Trading Rules Gate ───────────────────────────────────────────
         const orderSymbol: string = operationData.ts || '';
         const orderSideRaw: string = (operationData.tt || '').toUpperCase();
@@ -388,17 +388,82 @@ export async function POST(request: NextRequest) {
         break;
       }
 
-      case 'modifyOrder':
-        endpoint = '/quick/order/rule/ms/modify';
-        useFormEncoded = true;
-        requestBody = { jData: JSON.stringify(operationData) };
-        break;
+          case 'placeOrder': {
+      endpoint = '/quick/order/rule/ms/place';
+      useFormEncoded = true;
 
-      case 'cancelOrder':
-        endpoint = '/quick/order/rule/ms/cancel';
-        useFormEncoded = true;
-        requestBody = { jData: JSON.stringify(operationData) };
-        break;
+      let kotakOrderType = operationData.pt;
+      if (operationData.pt === 'MARKET')      kotakOrderType = 'MKT';
+      else if (operationData.pt === 'LIMIT')  kotakOrderType = 'LMT';
+      else if (operationData.pt === 'SL')     kotakOrderType = 'SL';
+      else if (operationData.pt === 'SL-M')   kotakOrderType = 'SL-M';
+
+      requestBody = {
+        jData: JSON.stringify({
+          am:  operationData.am  || 'NO',
+          dq:  operationData.dq  || '0',
+          es:  operationData.es,
+          mp:  operationData.mp  || '0',
+          pc:  operationData.pc,
+          pf:  operationData.pf  || 'N',
+          pr:  operationData.pr  || '0',
+          pt:  kotakOrderType,
+          qt:  operationData.qty,
+          rt:  operationData.rt  || 'DAY',
+          tp:  operationData.tp  || '0',
+          ts:  operationData.ts,
+          tt:  operationData.tt,
+        }),
+      };
+      break;
+    }
+        case 'modifyOrder':
+          endpoint = '/quick/order/vr/modify';       
+          useFormEncoded = true;
+          requestBody = {
+            jData: JSON.stringify({
+              tk:  operationData.tk,
+              mp:  operationData.mp  || '0',
+              pc:  operationData.pc,
+              dd:  operationData.dd  || 'NA',
+              dq:  operationData.dq  || '0',
+              vd:  operationData.vd  || operationData.rt || 'DAY',
+              ts:  operationData.ts,
+              tt:  operationData.tt,
+              pr:  operationData.pr,
+              tp:  operationData.tp  || '0',
+              qt:  operationData.qt  || operationData.qty,
+              no:  operationData.no,                   
+              es:  operationData.es,
+              pt:  operationData.pt,
+              ...(operationData.fq ? { fq: operationData.fq } : {}),
+            }),
+          };
+          break;
+
+        case 'cancelOrder': {
+          const isBracketOrder = operationData.pc === 'BO';
+          const isCoverOrder   = operationData.pc === 'CO';
+
+          if (isBracketOrder) {
+            endpoint = '/quick/order/bo/exit';          
+          } else if (isCoverOrder) {
+            endpoint = '/quick/order/co/exit';           
+          } else {
+            endpoint = '/quick/order/cancel';  
+          }
+
+          useFormEncoded = true;
+          requestBody = {
+            jData: JSON.stringify({
+              on:  operationData.on || operationData.no, 
+              am:  operationData.am || 'NO',
+              ...(operationData.am === 'YES' ? { ts: operationData.ts } : {}),
+              ...(isBracketOrder && operationData.symOrdId ? { symOrdId: operationData.symOrdId } : {}),
+            }),
+          };
+          break;
+        }
 
       case 'exitPosition':
         endpoint = '/quick/order/rule/ms/exit';

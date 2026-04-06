@@ -9,6 +9,21 @@ import { BarChart3, TrendingUp, LogIn } from 'lucide-react';
 
 const SESSION_STORAGE_KEY = 'kotak_session';
 
+/**
+ * Helper: set cookie
+ */
+function setCookie(name: string, value: string, days = 1) {
+  const expires = new Date(Date.now() + days * 864e5).toUTCString();
+  document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+}
+
+/**
+ * Helper: delete cookie
+ */
+function deleteCookie(name: string) {
+  document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;`;
+}
+
 export default function Home() {
   const [showLogin, setShowLogin] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -29,28 +44,38 @@ export default function Home() {
       }
     } catch (error) {
       console.error('Failed to restore session:', error);
-      // Clear corrupted session
       localStorage.removeItem(SESSION_STORAGE_KEY);
     } finally {
       setIsLoading(false);
     }
   }, []);
 
+  /**
+   * On successful login
+   */
   const handleAuthSuccess = (session: any) => {
-    console.log('💾 Storing session to localStorage');
-    // Store session in localStorage
+    console.log('💾 Storing session to localStorage + cookies');
+
+    // Save to localStorage
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
-    
+
+    // Save to cookie (for server/API routes)
+    setCookie('kotak_session', JSON.stringify(session), 1);
+
     setSessionInfo(session);
     setIsAuthenticated(true);
     setShowLogin(false);
   };
 
+  /**
+   * Logout
+   */
   const handleLogout = () => {
-    console.log('🗑️  Clearing session from localStorage');
-    // Clear session from localStorage
+    console.log('🗑️ Clearing session from localStorage + cookies');
+
     localStorage.removeItem(SESSION_STORAGE_KEY);
-    
+    deleteCookie('kotak_session');
+
     setIsAuthenticated(false);
     setSessionInfo(null);
   };
@@ -76,6 +101,7 @@ export default function Home() {
               <h1 className="text-4xl font-bold text-gray-900">Trading Terminal</h1>
               <p className="text-gray-600 mt-1">Kotak Neo Securities API Integration</p>
             </div>
+
             <div className="flex items-center gap-3">
               <div className="text-right">
                 <p className="text-sm font-medium text-gray-700">
@@ -85,6 +111,7 @@ export default function Home() {
                   {isAuthenticated ? 'Ready to trade' : 'Connect to start trading'}
                 </p>
               </div>
+
               {isAuthenticated ? (
                 <button
                   onClick={handleLogout}
@@ -112,6 +139,7 @@ export default function Home() {
               <BarChart3 size={16} />
               Dashboard
             </TabsTrigger>
+
             <TabsTrigger
               value="trading"
               disabled={!isAuthenticated}
@@ -122,12 +150,12 @@ export default function Home() {
             </TabsTrigger>
           </TabsList>
 
-          {/* Dashboard Tab */}
+          {/* Dashboard */}
           <TabsContent value="dashboard" className="mt-6">
             <Dashboard isAuthenticated={isAuthenticated} />
           </TabsContent>
 
-          {/* Trading Tab */}
+          {/* Trading */}
           <TabsContent value="trading" className="mt-6">
             {isAuthenticated ? (
               <TradingPanel

@@ -307,8 +307,10 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
 
   const chainRef   = useRef<OptionChainRow[]>([]);
   chainRef.current = chain;
-  const atmRowRef  = useRef<HTMLDivElement | null>(null);
-  const ltpMapRef  = useRef<Map<string, number>>(new Map());
+  const atmRowRef      = useRef<HTMLDivElement | null>(null);
+  const ltpMapRef      = useRef<Map<string, number>>(new Map());
+  const isFetchingLTP  = useRef(false);   // guard against overlapping LTP calls
+  const isFetchingSpot = useRef(false);   // guard against overlapping spot calls
 
   // ── Watchlist ─────────────────────────────────────────────────────────────
 
@@ -430,6 +432,8 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
 
   const fetchSpot = useCallback(async () => {
     if (niftyLTP && niftyLTP > 1000) return;
+    if (isFetchingSpot.current) return;
+    isFetchingSpot.current = true;
     try {
       const nowTs = Math.floor(Date.now() / 1000);
       const { data: foRows } = await supabase
@@ -470,6 +474,8 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
     } catch (err) {
       console.error('[OptionsChain] fetchSpot:', err);
       setSpotLoading(false);
+    } finally {
+      isFetchingSpot.current = false;
     }
   }, [niftyLTP]);
 
@@ -609,6 +615,8 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
   useEffect(() => { ltpMapRef.current = new Map(); }, [selectedExpiry?.raw]);
 
   const fetchLTPs = useCallback(async () => {
+    // Skip if a previous fetch is still in flight
+    if (isFetchingLTP.current) return;
     const current = chainRef.current;
     if (!current.length) return;
 
@@ -620,6 +628,7 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
     });
     if (!queries.length) return;
 
+    isFetchingLTP.current = true;
     try {
       type Change = { rowIdx: number; side: 'ce' | 'pe'; price: number };
       const changes: Change[] = [];
@@ -663,13 +672,15 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
       }
     } catch (err) {
       warn('fetchLTPs error:', err);
+    } finally {
+      isFetchingLTP.current = false;
     }
   }, []);
 
   useEffect(() => {
     if (!selectedExpiry) return;
     const t  = setTimeout(() => fetchLTPs(), 300);
-    const id = setInterval(fetchLTPs, 2000);
+    const id = setInterval(fetchLTPs, 3000);   // 3s — prevents pile-up on slow connections
     return () => { clearTimeout(t); clearInterval(id); };
   }, [selectedExpiry?.raw, fetchLTPs]);
 

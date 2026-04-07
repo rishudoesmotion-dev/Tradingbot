@@ -22,6 +22,7 @@ export interface UseTradingActions {
   buy: (config: any) => Promise<void>;
   sell: (config: any) => Promise<void>;
   cancelOrder: (orderId: string) => Promise<void>;
+  modifyOrder: (orderId: string, newPrice: number, quantity: number) => Promise<void>;
   exitPosition: (symbol: string) => Promise<void>;
   refreshData: () => Promise<void>;
   getLTP: (symbol: string) => Promise<number>;
@@ -163,8 +164,8 @@ export function useKotakTrading(): UseTradingState & UseTradingActions {
   const cancelOrder = async (orderId: string) => {
     setState(prev => ({ ...prev, isLoading: true, error: null }));
     try {
+      if (!orderId) throw new Error('No order ID provided');
       const result = await kotakTradingService.cancelOrder(orderId);
-
       if (result.success) {
         await refreshData();
       } else {
@@ -174,6 +175,29 @@ export function useKotakTrading(): UseTradingState & UseTradingActions {
       setState(prev => ({
         ...prev,
         error: error instanceof Error ? error.message : 'Order cancellation failed',
+      }));
+    } finally {
+      setState(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  /**
+   * Modify order price / quantity
+   */
+  const modifyOrder = async (orderId: string, newPrice: number, quantity: number) => {
+    setState(prev => ({ ...prev, isLoading: true, error: null }));
+    try {
+      if (!orderId) throw new Error('No order ID provided');
+      const result = await kotakTradingService.modifyOrder(orderId, newPrice, quantity);
+      if (result.success) {
+        await refreshData();
+      } else {
+        setState(prev => ({ ...prev, error: result.message }));
+      }
+    } catch (error) {
+      setState(prev => ({
+        ...prev,
+        error: error instanceof Error ? error.message : 'Order modification failed',
       }));
     } finally {
       setState(prev => ({ ...prev, isLoading: false }));
@@ -557,6 +581,7 @@ export function useKotakTrading(): UseTradingState & UseTradingActions {
     buy,
     sell,
     cancelOrder,
+    modifyOrder,
     exitPosition,
     refreshData,
     getLTP,

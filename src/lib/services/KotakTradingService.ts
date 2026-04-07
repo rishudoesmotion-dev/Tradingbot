@@ -264,16 +264,26 @@ export class KotakTradingService {
   }
 
   /**
-   * Cancel an order
+   * Cancel an order — uses the proxy (works with session-based auth)
    */
   async cancelOrder(orderId: string): Promise<TradeResponse> {
     if (!this.isReady()) {
-      return { success: false, message: 'Service not initialized' };
+      return { success: false, message: 'Not authenticated — please reconnect' };
     }
 
     try {
+      // Use proxy via callTradingAPI (works for session-based auth)
+      if (this.sessionInfo) {
+        const result = await this.callTradingAPI('POST', 'cancelOrder', { on: orderId, am: 'NO' });
+        const ok = result?.stat === 'Ok' || result?.nOrdNo || result?.success;
+        return {
+          success: !!ok,
+          message: ok ? `✅ Order cancelled: ${orderId}` : `❌ Cancel failed: ${JSON.stringify(result)}`,
+          data: result,
+        };
+      }
+      // Legacy: direct broker call
       const cancelled = await this.broker!.cancelOrder(orderId);
-      
       return {
         success: cancelled,
         message: cancelled ? `✅ Order cancelled: ${orderId}` : `❌ Failed to cancel order`,
@@ -282,6 +292,46 @@ export class KotakTradingService {
       return {
         success: false,
         message: `❌ Cancel failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+  }
+
+  /**
+   * Modify an order's price and/or quantity — uses the proxy
+   */
+  async modifyOrder(orderId: string, newPrice: number, quantity: number): Promise<TradeResponse> {
+    if (!this.isReady()) {
+      return { success: false, message: 'Not authenticated — please reconnect' };
+    }
+
+    try {
+      if (this.sessionInfo) {
+        const result = await this.callTradingAPI('POST', 'modifyOrder', {
+          no:  orderId,
+          pr:  String(newPrice),
+          qt:  String(quantity),
+          vd:  'DAY',
+        });
+        const ok = result?.stat === 'Ok' || result?.nOrdNo || result?.success;
+        return {
+          success: !!ok,
+          orderId: result?.nOrdNo || orderId,
+          message: ok ? `✅ Order modified: ${orderId} → ₹${newPrice}` : `❌ Modify failed: ${JSON.stringify(result)}`,
+          data: result,
+        };
+      }
+      // Legacy: direct broker call
+      const order = await this.broker!.modifyOrder(orderId, { price: newPrice, quantity });
+      return {
+        success: true,
+        orderId: order.orderId,
+        message: `✅ Order modified: ${orderId} → ₹${newPrice}`,
+        data: order,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: `❌ Modify failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
       };
     }
   }

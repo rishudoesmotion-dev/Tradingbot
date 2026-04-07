@@ -1,6 +1,7 @@
 'use client';
 
-import { RefreshCw, X, Loader2, CheckCircle, Clock, AlertCircle } from 'lucide-react';
+import { useState } from 'react';
+import { RefreshCw, X, Loader2, CheckCircle, Clock, AlertCircle, Pencil } from 'lucide-react';
 
 interface Order {
   orderId: string;
@@ -22,6 +23,7 @@ interface OrdersTableProps {
   orders: Order[];
   isLoading: boolean;
   onCancel: (orderId: string) => Promise<void>;
+  onModify: (orderId: string, newPrice: number, quantity: number) => Promise<void>;
   onRefresh: () => Promise<void>;
 }
 
@@ -52,8 +54,13 @@ const formatTime = (value?: Date | string): string => {
   return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 };
 
-export default function OrdersTable({ orders, isLoading, onCancel, onRefresh }: OrdersTableProps) {
-  // Sort newest-first: use fillTimestamp for completed orders, otherwise placed timestamp
+export default function OrdersTable({ orders, isLoading, onCancel, onModify, onRefresh }: OrdersTableProps) {
+  const [modifyOrder, setModifyOrder] = useState<Order | null>(null);
+  const [modifyPrice, setModifyPrice] = useState('');
+  const [modifyQty,   setModifyQty]   = useState('');
+  const [modifying,   setModifying]   = useState(false);
+
+  // Sort newest-first
   const sortedOrders = [...orders].sort((a, b) => {
     const getTime = (o: Order): number => {
       const ts = o.fillTimestamp || o.flTm || o.timestamp || o.ordDtTm;
@@ -61,7 +68,7 @@ export default function OrdersTable({ orders, isLoading, onCancel, onRefresh }: 
       const d = ts instanceof Date ? ts : new Date(ts);
       return isNaN(d.getTime()) ? 0 : d.getTime();
     };
-    return getTime(b) - getTime(a); // descending — most recent first
+    return getTime(b) - getTime(a);
   });
 
   // Count completed BUY and SELL orders
@@ -79,8 +86,93 @@ export default function OrdersTable({ orders, isLoading, onCancel, onRefresh }: 
     return isComplete && !isBuy;
   }).length;
 
+  // Resolve the real Kotak order ID from whichever field is populated
+  const getOrderId = (o: Order): string =>
+    o.nOrdNo || o.orderId || o.order_id || o.id || '';
+
+  const openModify = (order: Order) => {
+    const limitPrice = order.price ?? parseFloat(order.prc || '0');
+    const qty = order.quantity ?? parseInt(order.qty || '0');
+    setModifyOrder(order);
+    setModifyPrice(limitPrice > 0 ? String(limitPrice) : '');
+    setModifyQty(qty > 0 ? String(qty) : '');
+  };
+
+  const submitModify = async () => {
+    if (!modifyOrder) return;
+    const price = parseFloat(modifyPrice);
+    const qty   = parseInt(modifyQty);
+    if (isNaN(price) || price <= 0) return;
+    if (isNaN(qty)   || qty   <= 0) return;
+    setModifying(true);
+    try {
+      await onModify(getOrderId(modifyOrder), price, qty);
+      setModifyOrder(null);
+    } finally {
+      setModifying(false);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full">
+      {/* Modify Order Dialog */}
+      {modifyOrder && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-xl shadow-xl p-5 w-80 mx-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold text-gray-800">Modify Order</h3>
+              <button onClick={() => setModifyOrder(null)} className="text-gray-400 hover:text-gray-600">
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">
+              {modifyOrder.symbol || modifyOrder.trdSym} &nbsp;·&nbsp;
+              <span className={(modifyOrder.side?.toUpperCase() === 'BUY' || modifyOrder.trnsTp === 'B') ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'}>
+                {(modifyOrder.side?.toUpperCase() === 'BUY' || modifyOrder.trnsTp === 'B') ? 'BUY' : 'SELL'}
+              </span>
+            </p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">New Price (₹)</label>
+                <input
+                  type="number"
+                  value={modifyPrice}
+                  onChange={e => setModifyPrice(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Enter new price"
+                  step="0.05"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">Quantity</label>
+                <input
+                  type="number"
+                  value={modifyQty}
+                  onChange={e => setModifyQty(e.target.value)}
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Quantity"
+                />
+              </div>
+            </div>
+            <div className="flex gap-2 mt-4">
+              <button
+                onClick={() => setModifyOrder(null)}
+                className="flex-1 py-2 text-xs font-semibold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitModify}
+                disabled={modifying}
+                className="flex-1 py-2 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition disabled:opacity-50 flex items-center justify-center gap-1"
+              >
+                {modifying ? <Loader2 size={12} className="animate-spin" /> : <Pencil size={12} />}
+                Modify
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
         <div className="flex items-center gap-2">
@@ -180,20 +272,31 @@ export default function OrdersTable({ orders, isLoading, onCancel, onRefresh }: 
                         <p className="text-xs font-semibold text-gray-700 tabular-nums">{displayTime}</p>
                         <p className="text-xs text-gray-400">{timeLabel}</p>
                       </div>
-                      {/* Status + cancel */}
+                      {/* Status + cancel + modify */}
                       <div className="flex flex-col items-end gap-0.5">
                         <div className={`flex items-center gap-1 text-xs font-semibold ${statusColor(order.status || order.ordSt || '')}`}>
                           {statusIcon(order.status || order.ordSt || '')}
                           <span className="hidden sm:inline capitalize">{order.status || order.ordSt || '—'}</span>
                         </div>
                         {canCancel && (
-                          <button
-                            onClick={() => onCancel(order.orderId || order.nOrdNo)}
-                            disabled={isLoading}
-                            className="text-xs text-red-500 hover:text-red-700 font-semibold transition opacity-0 group-hover:opacity-100"
-                          >
-                            Cancel
-                          </button>
+                          <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition">
+                            <button
+                              onClick={() => openModify(order)}
+                              className="text-xs text-blue-500 hover:text-blue-700 font-semibold"
+                              title="Modify price"
+                            >
+                              Modify
+                            </button>
+                            <span className="text-gray-300">|</span>
+                            <button
+                              onClick={() => onCancel(getOrderId(order))}
+                              disabled={isLoading}
+                              className="text-xs text-red-500 hover:text-red-700 font-semibold"
+                              title="Cancel order"
+                            >
+                              Cancel
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>

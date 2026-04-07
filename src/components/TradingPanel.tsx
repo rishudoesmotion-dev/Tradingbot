@@ -1,18 +1,15 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useKotakTrading } from "@/hooks/useKotakTrading";
-import { kotakTradingService } from "@/lib/services/KotakTradingService";
 import { getDynamicPollingService } from "@/lib/services/DynamicPollingService";
 import { tradingRulesService } from "@/lib/services/TradingRulesService";
 import { ScripResult } from "@/lib/services/ScripSearchService";
 import { isMarketOpen } from "@/lib/utils/marketHours";
-import { RiskManager } from "@/lib/risk/RiskManager";
 import { getTradesService } from "@/lib/services/TradesService";
 import { supabase } from "@/lib/supabase/client";
 import {
   getMarketDataStreamService,
-  PriceUpdate,
 } from "@/lib/services/MarketDataStreamService";
 import Watchlist from "./trading/Watchlist";
 import OrderForm, { OrderPayload } from "./trading/OrderForm";
@@ -66,6 +63,14 @@ export default function TradingPanel({
   const [showRules, setShowRules] = useState(false);
   const [niftyLTP, setNiftyLTP] = useState<number | null>(null);
 
+  // Cache userId to avoid async lookup on every order
+  const userIdRef = useRef<string>("");
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      userIdRef.current = data.user?.id ?? "";
+    });
+  }, []);
+
   // ── Connect with session on mount ────────────────────────────────────────
   useEffect(() => {
     if (sessionInfo && !trading.isConnected) {
@@ -102,137 +107,115 @@ export default function TradingPanel({
     return () => clearInterval(interval);
   }, [refreshTradingStatus]);
 
-  // ── Live LTP for selected scrip ──────────────────────────────────────────
-  useEffect(() => {
-    if (!selectedScrip) return;
+  // ── Single MarketDataStreamService for ALL live prices ───────────────────
+  // Subscribes NIFTY + selected scrip + open positions in ONE WS connection.
+  // The service handles reconnect with exponential backoff internally.
+  const selectedScripKey =
+    selectedScrip
+      ? `${(selectedScrip.p_exch_seg || selectedScrip.segment || "nse_fo").toLowerCase()}|${selectedScrip.p_tok ?? selectedScrip.p_symbol ?? ""}`
+      : "";
 
-    const seg   = (selectedScrip.p_exch_seg || selectedScrip.segment || "nse_fo").toLowerCase();
-    const token = selectedScrip.p_tok ?? selectedScrip.p_symbol;
-    if (!token) return;
+  const positionSymbolsKey = trading.positions
+    .filter((p) => (p.quantity || 0) !== 0)
+    .map((p) => `${((p as any).exchange || "nse_fo").toLowerCase()}|${(p as any).tok || (p as any).symbol || ""}`)
+    .sort()
+    .join(",");
 
-    let cancelled = false;
+  // Ref to track which scrip keys the stream service currently knows about
+  const streamScripsRef = useRef<Set<string>>(new Set());
 
-    const fetchLTP = async () => {
-      if (cancelled) return;
-      try {
-        const result = await kotakTradingService.getLTP(token, seg);
-        if (result?.ltp > 0 && !cancelled) {
-          setSelectedScripLTP(result.ltp);
-        }
-      } catch (err) {
-        console.warn("[TradingPanel] selectedScrip LTP fetch failed:", err);
-      }
-    };
-
-    fetchLTP();
-    const id = setInterval(fetchLTP, 2000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-      setSelectedScripLTP(undefined);
-    };
-  }, [selectedScrip?.p_tok, selectedScrip?.p_exch_seg, trading.isConnected]);
-
-  // ── NIFTY 50 live price via WebSocket (REST fallback) ────────────────────
   useEffect(() => {
     if (!trading.isConnected) return;
 
-    const NIFTY_TOKEN = "26000";
-    const NIFTY_SEG   = "nse_cm";
-    const scripKey    = `${NIFTY_SEG}|${NIFTY_TOKEN}`;
+    let session: any = {};
+    try { session = JSON.parse(localStorage.getItem("kotak_session") || "{}"); } catch { /* */ }
+    if (!session?.tradingToken || !session?.tradingSid) return;
 
-    let wsRef: any = null;
-    let heartbeatRef: ReturnType<typeof setInterval> | null = null;
-    let pollRef: ReturnType<typeof setInterval> | null = null;
-    let cancelled = false;
+    const NIFTY_KEY = "nse_cm|26000";
+    const streamService = getMarketDataStreamService();
 
-    const session = (() => {
-      try {
-        return JSON.parse(localStorage.getItem("kotak_session") || "{}");
-      } catch {
-        return {};
+    // Build the complete scrip list: NIFTY + selected scrip + open positions
+    const allScrips = new Set<string>([NIFTY_KEY]);
+    if (selectedScripKey && selectedScripKey.endsWith("|")) {
+      // token missing — skip
+    } else if (selectedScripKey) {
+      allScrips.add(selectedScripKey);
+    }
+    positionSymbolsKey.split(",").filter(Boolean).forEach((k) => allScrips.add(k));
+
+    // Build token→trdSymbol map for position LTP updates
+    const tokenToTrdSym: Record<string, string> = {};
+    trading.positions
+      .filter((p) => (p.quantity || 0) !== 0)
+      .forEach((p) => {
+        const tok    = (p as any).tok      || "";
+        const trdSym = (p as any).symbol   || "";
+        if (tok)    { tokenToTrdSym[tok]    = trdSym; }
+        if (trdSym) { tokenToTrdSym[trdSym] = trdSym; }
+      });
+
+    const handlePrice = (update: { symbol: string; ltp: number }) => {
+      const { symbol, ltp } = update;
+      if (ltp <= 0) return;
+
+      // NIFTY price
+      if (symbol === NIFTY_KEY || symbol === "26000") {
+        if (ltp > 1000) setNiftyLTP(ltp);
+        return;
       }
-    })();
 
-    const startRestPoll = () => {
-      if (cancelled || pollRef) return;
-      const doFetch = async () => {
-        if (cancelled) return;
-        try {
-          const result = await kotakTradingService.getLTP(NIFTY_TOKEN, NIFTY_SEG);
-          if (result?.ltp > 0 && !cancelled) setNiftyLTP(result.ltp);
-        } catch (err) {
-          console.warn("[TradingPanel] NIFTY REST fetch failed:", err);
-        }
-      };
-      doFetch();
-      pollRef = setInterval(doFetch, 5000);
+      // Selected scrip price: match by full key OR by token alone
+      if (
+        selectedScripKey &&
+        (symbol === selectedScripKey || symbol === selectedScrip?.p_tok || symbol === (selectedScrip?.p_tok ?? ""))
+      ) {
+        setSelectedScripLTP(ltp);
+      }
+
+      // Position LTP
+      const [, tok] = symbol.split("|");
+      const matchedSym = tokenToTrdSym[tok] || tokenToTrdSym[symbol];
+      if (matchedSym) trading.updatePositionLTP(matchedSym, ltp);
     };
 
-    if (
-      session?.tradingToken &&
-      session?.tradingSid &&
-      typeof window !== "undefined"
-    ) {
-      try {
-        const WsClass =
-          typeof (window as any).HSWebSocket === "function"
-            ? (window as any).HSWebSocket
-            : WebSocket;
+    const scripsArray = Array.from(allScrips);
 
-        const ws = new WsClass("wss://mlhsm.kotaksecurities.com");
-        wsRef = ws;
-
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ Authorization: session.tradingToken, Sid: session.tradingSid, type: "cn" }));
-          heartbeatRef = setInterval(() => {
-            if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ti", scrips: "" }));
-          }, 30_000);
-          setTimeout(() => {
-            if (ws.readyState === 1) {
-              ws.send(JSON.stringify({ type: "mws", scrips: scripKey, channelnum: 1 }));
-            }
-          }, 800);
-        };
-
-        ws.onmessage = (msgOrEvent: any) => {
-          try {
-            const raw    = typeof msgOrEvent === "string" ? msgOrEvent : msgOrEvent?.data;
-            if (!raw) return;
-            const data   = typeof raw === "string" ? JSON.parse(raw) : raw;
-            const quotes = Array.isArray(data) ? data : data?.data ? data.data : [data];
-            for (const q of quotes) {
-              if (!q) continue;
-              const tickToken = String(q.tk ?? q.token ?? "");
-              if (tickToken && tickToken !== NIFTY_TOKEN) continue;
-              const rawLtp = q.ltp ?? q.ltP ?? q.lp ?? q.last_price;
-              if (rawLtp === undefined) continue;
-              const price = parseFloat(String(rawLtp));
-              if (price > 1000 && !cancelled) setNiftyLTP(price);
-            }
-          } catch { /* ignore */ }
-        };
-
-        ws.onerror = () => startRestPoll();
-        ws.onclose = () => {
-          if (heartbeatRef) { clearInterval(heartbeatRef); heartbeatRef = null; }
-          if (!cancelled) startRestPoll();
-        };
-      } catch {
-        startRestPoll();
-      }
+    if (!streamService.isConnected()) {
+      // Fresh start — subscribe everything
+      streamScripsRef.current = new Set(scripsArray);
+      streamService.subscribe(session, scripsArray, handlePrice).catch((err) => {
+        console.error("[TradingPanel] MarketDataStreamService subscribe failed:", err);
+      });
     } else {
-      startRestPoll();
+      // Already connected — add only NEW scrips
+      const toAdd = scripsArray.filter((k) => !streamScripsRef.current.has(k));
+      if (toAdd.length > 0) {
+        toAdd.forEach((k) => streamScripsRef.current.add(k));
+        streamService.addSubscriptions(toAdd);
+      }
+      // Update price callback so closures are fresh
+      streamService.setPriceCallback(handlePrice);
     }
 
     return () => {
-      cancelled = true;
-      if (heartbeatRef) clearInterval(heartbeatRef);
-      if (pollRef)      clearInterval(pollRef);
-      if (wsRef) { try { wsRef.close(); } catch { /* ignore */ } }
+      // Don't disconnect here — the service stays alive across scrip changes.
+      // We only kill it when the component fully unmounts (isConnected → false).
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trading.isConnected, selectedScripKey, positionSymbolsKey]);
+
+  // Kill stream on full disconnect / unmount
+  useEffect(() => {
+    if (!trading.isConnected) {
+      getMarketDataStreamService().disconnect();
+      streamScripsRef.current = new Set();
+    }
   }, [trading.isConnected]);
+
+  // Clear selected-scrip LTP when scrip changes
+  useEffect(() => {
+    setSelectedScripLTP(undefined);
+  }, [selectedScripKey]);
 
   // ── Auto-refresh with dynamic polling ────────────────────────────────────
   useEffect(() => {
@@ -279,104 +262,6 @@ export default function TradingPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trading.sessionExpired]);
 
-  // ── Live WebSocket for open positions ────────────────────────────────────
-  const positionSymbolsKey = trading.positions
-    .filter((p) => (p.quantity || 0) !== 0)
-    .map((p) => `${(p as any).exchange || "nse_fo"}|${(p as any).tok || p.symbol}`)
-    .sort()
-    .join(",");
-
-  useEffect(() => {
-    if (!trading.isConnected) return;
-
-    const openPositions = trading.positions.filter((p) => (p.quantity || 0) !== 0);
-    if (openPositions.length === 0) return;
-
-    const session = JSON.parse(localStorage.getItem("kotak_session") || "{}");
-    if (!session?.tradingToken || !session?.tradingSid) return;
-
-    let wsRef: any = null;
-    let heartbeatRef: ReturnType<typeof setInterval> | null = null;
-    let cancelled = false;
-
-    const tokenToTrdSym: Record<string, string> = {};
-    const positionScrips: string[] = [];
-
-    for (const pos of openPositions) {
-      const trdSym   = (pos as any).symbol   || "";
-      const tok      = (pos as any).tok       || "";
-      const exchange = ((pos as any).exchange || "nse_fo").toLowerCase();
-      if (tok) {
-        positionScrips.push(`${exchange}|${tok}`);
-        tokenToTrdSym[tok]    = trdSym;
-        tokenToTrdSym[trdSym] = trdSym;
-      } else if (trdSym) {
-        positionScrips.push(`${exchange}|${trdSym}`);
-        tokenToTrdSym[trdSym] = trdSym;
-      }
-    }
-
-    if (positionScrips.length === 0) return;
-
-    try {
-      const WsClass =
-        typeof (window as any).HSWebSocket === "function"
-          ? (window as any).HSWebSocket
-          : WebSocket;
-
-      const ws = new WsClass("wss://mlhsm.kotaksecurities.com");
-      wsRef = ws;
-
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ Authorization: session.tradingToken, Sid: session.tradingSid, type: "cn" }));
-        heartbeatRef = setInterval(() => {
-          if (ws.readyState === 1) ws.send(JSON.stringify({ type: "ti", scrips: "" }));
-        }, 30000);
-        setTimeout(() => {
-          if (ws.readyState === 1) {
-            positionScrips.forEach((scrip, idx) => {
-              ws.send(JSON.stringify({ type: "mws", scrips: scrip, channelnum: idx + 2 }));
-            });
-          }
-        }, 800);
-      };
-
-      ws.onmessage = (msgOrEvent: any) => {
-        try {
-          const raw    = typeof msgOrEvent === "string" ? msgOrEvent : msgOrEvent?.data;
-          if (!raw) return;
-          const data   = typeof raw === "string" ? JSON.parse(raw) : raw;
-          const quotes = Array.isArray(data) ? data : data?.data ? data.data : [data];
-          for (const q of quotes) {
-            if (!q) continue;
-            const rawLtp = q.ltp ?? q.ltP ?? q.lp ?? q.last_price;
-            if (rawLtp === undefined) continue;
-            const price = parseFloat(String(rawLtp));
-            if (price <= 0 || cancelled) continue;
-            const wsToken  = q.tk   || q.token  || "";
-            const wsTrdSym = q.tsym || q.sym     || q.display_symbol || "";
-            const matchedSym = tokenToTrdSym[wsToken] || tokenToTrdSym[wsTrdSym] || "";
-            if (matchedSym) trading.updatePositionLTP(matchedSym, price);
-          }
-        } catch { /* ignore */ }
-      };
-
-      ws.onerror = () => console.warn("[TradingPanel] Position WebSocket error");
-      ws.onclose = () => {
-        if (heartbeatRef) { clearInterval(heartbeatRef); heartbeatRef = null; }
-      };
-    } catch (error) {
-      console.error("[TradingPanel] Error starting position WebSocket:", error);
-    }
-
-    return () => {
-      cancelled = true;
-      if (heartbeatRef) clearInterval(heartbeatRef);
-      if (wsRef) { try { wsRef.close(); } catch { /* ignore */ } }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [positionSymbolsKey, trading.isConnected]);
-
   // ── Handlers ─────────────────────────────────────────────────────────────
 
   const handleManualRefresh = async () => {
@@ -387,67 +272,31 @@ export default function TradingPanel({
   const handleWatchlistSelect = (scrip: ScripResult, side: "BUY" | "SELL") => {
     setSelectedScrip(scrip);
     setDefaultSide(side);
-    setSelectedScripLTP(undefined);
   };
 
   const handleLTPUpdate = (trdSymbol: string, ltp: number) => {
-    setSelectedScrip((current) => {
-      if (current && trdSymbol === current.p_trd_symbol) setSelectedScripLTP(ltp);
-      return current;
-    });
+    if (selectedScrip && trdSymbol === selectedScrip.p_trd_symbol) {
+      setSelectedScripLTP(ltp);
+    }
   };
 
   const handlePlaceOrder = async (
     order: OrderPayload,
   ): Promise<{ success: boolean; message: string }> => {
     try {
-      // Guard: double-check kill-switch before every order
-      const tradesService = getTradesService();
-      const manualStatus  = await tradesService.getTradingEnabled();
-      if (!manualStatus?.isEnabled) {
-        return {
-          success: false,
-          message: "⛔ Trading is deactivated. Re-enable in Supabase to resume.",
-        };
-      }
-
-      const riskManager  = new RiskManager();
-      const orderRequest = {
-        symbol:       order.trdSymbol,
-        exchange:     order.exchSeg,
-        side:         order.side as any,
-        quantity:     order.quantity,
-        orderType:    order.orderType as any,
-        productType:  order.productType as any,
-        price:        order.price,
-        triggerPrice: order.triggerPrice,
-      };
-
-      const validationResult = await riskManager.validateOrder(orderRequest, {
-        livePositions: trading.positions,
-        liveOrders:    trading.orders,
-      });
-      if (!validationResult.isValid) {
-        return {
-          success: false,
-          message: `Trading rule violation: ${validationResult.errors.join(" | ")}`,
-        };
-      }
-
+      // Read session synchronously from localStorage — zero latency
       const storedAuth = localStorage.getItem("kotak_session");
       if (!storedAuth) throw new Error("Session not found. Please login again.");
 
       const session = JSON.parse(storedAuth);
       const { tradingToken, tradingSid, baseUrl } = session;
-
       if (!tradingToken || !tradingSid || !baseUrl) {
-        throw new Error("Invalid session - missing authentication credentials. Please login again.");
+        throw new Error("Invalid session — missing credentials. Please login again.");
       }
 
       const consumerKey = process.env.NEXT_PUBLIC_KOTAK_CONSUMER_KEY!;
 
       // Kotak Neo order type codes: "MKT" | "L" | "SL" | "SL-M"
-      // Price is 0 for market & stop-loss-market orders
       const isMarketOrder = (ot: string) => ot === "MKT" || ot === "SL-M";
 
       const sendOrder = async (overrides: Partial<typeof order> = {}) => {
@@ -455,19 +304,17 @@ export default function TradingPanel({
         const payload = {
           action:       "placeOrder",
           tradingToken, tradingSid, baseUrl, consumerKey,
-          userId:       (await supabase.auth.getUser()).data.user?.id ?? "",
+          userId:       userIdRef.current, // cached at mount — no await needed
           am:  "NO",
           dq:  "0",
           es:  o.exchSeg,
           mp:  "0",
           pc:  o.productType,
           pf:  "N",
-          // Price must be "0" for MKT and SL-M orders
           pr:  String(isMarketOrder(o.orderType) ? 0 : o.price),
           pt:  o.orderType,
           qty: String(o.quantity),
           rt:  "DAY",
-          // Trigger price only applies to SL and SL-M orders
           tp:  String(o.orderType === "SL" || o.orderType === "SL-M" ? (o.triggerPrice ?? 0) : 0),
           tt:  o.side === "BUY" ? "B" : "S",
           ts:  o.trdSymbol,
@@ -487,26 +334,28 @@ export default function TradingPanel({
 
       let { ok, data } = await sendOrder();
 
-      // Fallback: if MKT order rejected (stCode 1041), retry as LIMIT @ LTP
+      // Fallback: if MKT order rejected (stCode 1041), retry as LIMIT @ cached LTP
       if (!ok && data?.details?.stCode === 1041 && order.orderType === "MKT") {
-        const ltp        = await kotakTradingService.getLTP(order.trdSymbol, order.exchSeg);
-        const limitPrice = ltp.ltp > 0 ? ltp.ltp : 0;
-        const retry      = await sendOrder({ orderType: "L", price: limitPrice });
+        const cached = getMarketDataStreamService().getLatestPrice(
+          `${order.exchSeg.toLowerCase()}|${order.trdSymbol}`
+        );
+        const limitPrice = cached && cached.ltp > 0 ? cached.ltp : 0;
+        const retry = await sendOrder({ orderType: "L", price: limitPrice });
         ok   = retry.ok;
         data = retry.data;
         if (ok && data?.data?.nOrdNo) {
-          await trading.refreshData();
-          setLastRefreshed(new Date());
+          // Refresh in background — don't block the success response
+          void trading.refreshData().then(() => setLastRefreshed(new Date()));
           return {
             success: true,
-            message: `✅ Order placed as LIMIT @ ₹${limitPrice} (market order rejected — LTP unavailable). ID: ${data.data.nOrdNo}`,
+            message: `✅ Order placed as LIMIT @ ₹${limitPrice} (MKT rejected). ID: ${data.data.nOrdNo}`,
           };
         }
       }
 
       if (ok && data?.data?.nOrdNo) {
-        await trading.refreshData();
-        setLastRefreshed(new Date());
+        // Refresh in background — UI shows success immediately
+        void trading.refreshData().then(() => setLastRefreshed(new Date()));
         return { success: true, message: `✅ Order Placed! ID: ${data.data.nOrdNo}` };
       }
 
@@ -865,6 +714,11 @@ export default function TradingPanel({
                 isLoading={trading.isLoading}
                 onCancel={async (id) => {
                   await trading.cancelOrder(id);
+                  await trading.refreshData();
+                  setLastRefreshed(new Date());
+                }}
+                onModify={async (id, price, qty) => {
+                  await trading.modifyOrder(id, price, qty);
                   await trading.refreshData();
                   setLastRefreshed(new Date());
                 }}

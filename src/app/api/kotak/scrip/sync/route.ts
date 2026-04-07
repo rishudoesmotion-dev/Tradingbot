@@ -1,9 +1,7 @@
 /**
  * Scrip Master Sync API
- * Syncs Nifty F&O instrument data from Kotak API to Supabase
- *
- * Filter  : OPTIDX + FUTIDX only, future expiry only
- * Segment : nse_fo only
+ * Syncs ALL instrument data from Kotak API to Supabase
+ * (no symbol / instrument-type / segment filter — full sync)
  *
  * Key notes from Kotak docs:
  * - Authorization header = plain consumerKey token (no tradingToken:tradingSid)
@@ -21,10 +19,7 @@ const NSE_FO_EXPIRY_OFFSET = 315511200;
 export const dynamic   = 'force-dynamic';
 export const maxDuration = 300;
 
-// ── Nifty filter config ──────────────────────────────────────────────────────
-const NIFTY_SYMBOLS     = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY'];
-const NIFTY_INSTR_TYPES = ['OPTIDX', 'FUTIDX'];
-// ─────────────────────────────────────────────────────────────────────────────
+// ── No symbol/instrument filter — sync everything ───────────────────────────
 
 interface ScripRecord {
   pSymbol: string;
@@ -87,15 +82,7 @@ async function getKotakBaseUrl(consumerKey: string, tradingToken: string, tradin
   return baseUrl;
 }
 
-// ── isNiftyRecord ─────────────────────────────────────────────────────────────
-// Returns true only for Nifty index futures/options.
-// pInstrName must be OPTIDX or FUTIDX (not OPTSTK/FUTSTK).
-// pSymbol must start with a known Nifty index root.
-function isNiftyRecord(pSymbol: string, pInstrName: string): boolean {
-  const instr  = pInstrName.toUpperCase().trim();
-  const symbol = pSymbol.toUpperCase().trim();
-  return NIFTY_INSTR_TYPES.includes(instr) && NIFTY_SYMBOLS.some(s => symbol.startsWith(s));
-}
+// ── isNiftyRecord removed — all instruments are synced ───────────────────────
 
 async function downloadAndParseCSV(csvUrl: string, segment: string): Promise<ScripRecord[]> {
   console.log(`[SYNC] Downloading CSV for segment: ${segment}`);
@@ -125,7 +112,6 @@ async function downloadAndParseCSV(csvUrl: string, segment: string): Promise<Scr
 
   const nowTs   = Math.floor(Date.now() / 1000);
   const records: ScripRecord[] = [];
-  let skippedInstr  = 0;
   let skippedExpiry = 0;
 
   for (let i = 1; i < lines.length; i++) {
@@ -138,17 +124,13 @@ async function downloadAndParseCSV(csvUrl: string, segment: string): Promise<Scr
     const pInstrName = v[3] || '';
     const pSymbol    = v[4] || '';
 
-    // Filter 1: Nifty index instruments only (OPTIDX / FUTIDX on NIFTY indices)
-    if (!isNiftyRecord(pSymbol, pInstrName)) {
-      skippedInstr++;
-      continue;
-    }
-
-    // Filter 2: Future expiry only
+    // Skip expired records (for F&O segments that have expiry dates)
     // Per Kotak docs: nse_fo raw lExpiryDate + 315511200 = actual Unix timestamp
-    const rawExpiry     = v[17] ? parseInt(v[17]) : undefined;
-    const lExpiryDate   = rawExpiry !== undefined ? rawExpiry + NSE_FO_EXPIRY_OFFSET : undefined;
-    if (!lExpiryDate || lExpiryDate < nowTs) {
+    const rawExpiry   = v[17] ? parseInt(v[17]) : undefined;
+    const lExpiryDate = rawExpiry !== undefined && rawExpiry > 0
+      ? rawExpiry + NSE_FO_EXPIRY_OFFSET
+      : undefined;
+    if (lExpiryDate !== undefined && lExpiryDate < nowTs) {
       skippedExpiry++;
       continue;
     }
@@ -161,7 +143,7 @@ async function downloadAndParseCSV(csvUrl: string, segment: string): Promise<Scr
     records.push({ pSymbol, pExchSeg, pTrdSymbol, lLotSize, pInstrName, lExpiryDate, pTok, segment });
   }
 
-  console.log(`[SYNC] ${segment}: ${records.length} kept | ${skippedInstr} skipped (not Nifty) | ${skippedExpiry} skipped (expired)`);
+  console.log(`[SYNC] ${segment}: ${records.length} kept | ${skippedExpiry} skipped (expired)`);
   return records;
 }
 
@@ -169,7 +151,7 @@ async function syncSegmentData(csvUrl: string, segment: string): Promise<number>
   const records = await downloadAndParseCSV(csvUrl, segment);
 
   if (records.length === 0) {
-    console.warn(`[SYNC] No Nifty records to sync for segment: ${segment}`);
+    console.warn(`[SYNC] No records to sync for segment: ${segment}`);
     return 0;
   }
 
@@ -236,11 +218,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('[SYNC] Starting Nifty-only scrip master sync...');
+    console.log('[SYNC] Starting full scrip master sync (all segments)...');
 
     if (fullSync) {
-      console.log('[SYNC] Full sync: clearing existing nse_fo data...');
-      await supabase.from('scrip_master').delete().eq('segment', 'nse_fo');
+      console.log('[SYNC] Full sync: clearing all existing scrip_master data...');
+      await supabase.from('scrip_master').delete().gt('id', 0);
     }
 
     // Resolve dynamic base URL
@@ -306,14 +288,12 @@ export async function POST(request: NextRequest) {
 
     console.log(`[SYNC] Found ${filesPaths.length} file(s):`, filesPaths);
 
-    // ── Only process nse_fo ────────────────────────────────────────────────
-    const segments = ['nse_fo'];
+    // ── Process all segments ───────────────────────────────────────────────
     const results: Record<string, number> = {};
 
     for (const csvUrl of filesPaths) {
       const segmentMatch = csvUrl.match(/(nse_cm|bse_cm|nse_fo|bse_fo|cde_fo)/);
       const segment      = segmentMatch ? segmentMatch[0] : 'unknown';
-      if (!segments.includes(segment)) continue;
 
       console.log(`[SYNC] Processing segment: ${segment}`);
       results[segment] = await syncSegmentData(csvUrl, segment);
@@ -327,11 +307,11 @@ export async function POST(request: NextRequest) {
       segments:      Object.keys(results).join(','),
     });
 
-    console.log(`[SYNC] Done. Nifty F&O records stored: ${totalRecords}`);
+    console.log(`[SYNC] Done. Total records stored across all segments: ${totalRecords}`);
 
     return NextResponse.json({
       success: true,
-      message: 'Nifty F&O scrip master sync completed',
+      message: 'Scrip master sync completed (all segments)',
       totalRecords,
       breakdown: results,
     });
@@ -358,8 +338,7 @@ export async function GET(request: NextRequest) {
 
     const { count } = await supabase
       .from('scrip_master')
-      .select('*', { count: 'exact', head: true })
-      .eq('segment', 'nse_fo');
+      .select('*', { count: 'exact', head: true });
 
     return NextResponse.json({
       isSynced:     (count ?? 0) > 0,

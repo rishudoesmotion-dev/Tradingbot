@@ -380,6 +380,11 @@ export class MarketDataStreamService {
     }, this.BUFFER_FLUSH_MS);
   }
 
+  /** Replace the price update callback (useful when closures become stale) */
+  setPriceCallback(cb: (update: PriceUpdate) => void): void {
+    this.onPriceUpdate = cb;
+  }
+
   /** Add more scrips to active subscription */
   addSubscriptions(newScrips: string[]): void {
     const toAdd = newScrips.filter((s) => !this.subscribedScrips.has(s));

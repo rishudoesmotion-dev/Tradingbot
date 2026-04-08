@@ -18,11 +18,9 @@ const io = new Server(server, {
 const subscriptions = new Map();
 
 io.on('connection', (socket) => {
-  console.log(`✅ Client connected: ${socket.id}`);
 
   // Handle subscription requests
   socket.on('subscribe', ({ symbols }) => {
-    console.log(`📊 Subscribe request for:`, symbols);
     
     symbols.forEach(({ symbol, exchange }) => {
       const key = `${exchange}:${symbol}`;
@@ -46,7 +44,6 @@ io.on('connection', (socket) => {
 
   // Handle unsubscribe requests
   socket.on('unsubscribe', ({ symbols }) => {
-    console.log(`🔕 Unsubscribe request for:`, symbols);
     
     symbols.forEach(({ symbol, exchange }) => {
       const key = `${exchange}:${symbol}`;
@@ -65,7 +62,6 @@ io.on('connection', (socket) => {
 
   // Handle disconnection
   socket.on('disconnect', () => {
-    console.log(`❌ Client disconnected: ${socket.id}`);
     
     // Remove client from all subscriptions
     subscriptions.forEach((subscribers, key) => {
@@ -122,15 +118,11 @@ app.get('/health', (req, res) => {
 const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
-  console.log(`🚀 WebSocket Server running on port ${PORT}`);
-  console.log(`📡 Ready to accept connections from trading terminal`);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('SIGTERM received, closing server...');
   server.close(() => {
-    console.log('Server closed');
     process.exit(0);
   });
 });

@@ -39,7 +39,6 @@ function parseOptionSymbol(sym: string): {
   
   const ceOrPe = sym.match(/(CE|PE)$/i);
   if (!ceOrPe) {
-    console.log('🔴 No CE/PE found in symbol:', sym);
     return null;
   }
 
@@ -49,7 +48,6 @@ function parseOptionSymbol(sym: string): {
   // Now extract: NIFTY + rest
   const m = withoutOptType.match(/^([A-Z]+)(.+)$/);
   if (!m) {
-    console.log('🔴 Could not parse underlying from:', sym);
     return null;
   }
 
@@ -71,10 +69,8 @@ function parseOptionSymbol(sym: string): {
   let displayStrike = strike;
   if (strike.length === 4 && strike[0].match(/[4-9]/)) {
     displayStrike = '2' + strike;
-    console.log(`  📊 Adjusted strike from ${strike} to ${displayStrike}`);
   }
   
-  console.log(`✅ parseOptionSymbol: ${sym} → underlying=${underlying}, dateCode=${dateCode}, strike=${displayStrike}, optType=${optType}`);
   
   return {
     underlying: underlying.toUpperCase(),

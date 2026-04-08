@@ -89,7 +89,6 @@ function bsPrice(S: number, K: number, T: number, r: number, sigma: number, type
 
 export async function GET(req: NextRequest) {
   try {
-    console.log('[optionchain] → request received')
     const cookieStore = cookies()
     const sp = req.nextUrl.searchParams
 
@@ -147,7 +146,6 @@ export async function GET(req: NextRequest) {
       .gte('l_expiry_date', todayStart)  // From today (midnight) onwards
       .order('l_expiry_date')
 
-    console.log('[optionchain] → expiries fetched:', expData?.length, 'err:', expError?.message)
 
     if (!expData?.length) {
       return NextResponse.json({ status: 'error', message: 'No expiries found' }, { status: 404 })
@@ -155,7 +153,6 @@ export async function GET(req: NextRequest) {
 
     const expiries = Array.from(new Set(expData.map((r: any) => r.l_expiry_date)))
     
-    console.log('[optionchain] → available expiries:', expiries.map(ts => `${ts} (${new Date(ts * 1000).toISOString().slice(0, 10)})`).join(', '))
     
     // Pick the NEAREST expiry (smallest timestamp >= nowTs)
     // This prefers today's expiry if available, otherwise next week
@@ -163,7 +160,6 @@ export async function GET(req: NextRequest) {
       ? expiries.reduce((best, ts) => Math.abs(ts - hintTs) < Math.abs(best - hintTs) ? ts : best) 
       : expiries.reduce((nearest, ts) => ts < nearest ? ts : nearest, expiries[0])
 
-    console.log('[optionchain] → selected expiry:', resolvedTs, '=', new Date(resolvedTs * 1000).toISOString(), hintTs ? `(from hint ${hintTs})` : '(nearest expiry)')
 
     /* ---------------------------
        FETCH OPTION ROWS (wide range)
@@ -176,7 +172,6 @@ export async function GET(req: NextRequest) {
       .eq('segment', 'nse_fo')
       .eq('l_expiry_date', resolvedTs)
 
-    console.log('[optionchain] → rows fetched:', rows?.length, 'err:', rowsError?.message)
 
     if (!rows?.length) {
       return NextResponse.json({ status: 'error', message: 'No option rows found' }, { status: 404 })
@@ -201,7 +196,6 @@ export async function GET(req: NextRequest) {
       )
     ).sort((a, b) => a - b)
 
-    console.log('[optionchain] → total strikes in DB:', strikes.length, 'sample:', strikes.slice(0, 10))
 
     /* ---------------------------
        BUILD STRIKE MAP (all strikes)
@@ -226,17 +220,28 @@ export async function GET(req: NextRequest) {
 
     const quoteMap = new Map<string, any>()
 
-    const CONCURRENCY = 50
+    const CONCURRENCY = 10  // Reduced from 50 to avoid rate limiting
     const fetchOne = async (tok: string) => {
       try {
         const url = `${sessionBaseUrl}/script-details/1.0/quotes/neosymbol/nse_fo|${tok}/all`
         const res  = await fetch(url, { method: 'GET', headers: kotakHeaders })
-        if (!res.ok) return
+        if (!res.ok) {
+          console.log(`[optionchain] ❌ Failed to fetch token ${tok}: ${res.status} ${res.statusText}`)
+          return
+        }
         const json = await res.json()
         const raw  = Array.isArray(json) ? json[0] : (json?.data ? (Array.isArray(json.data) ? json.data[0] : json.data) : json)
-        if (raw) quoteMap.set(tok, raw)
-      } catch { /* skip failed tokens */ }
+        if (raw) {
+          quoteMap.set(tok, raw)
+          console.log(`[optionchain] ✅ Fetched token ${tok}: LTP=${raw.ltp || raw.lp}`)
+        }
+      } catch (err) { 
+        console.log(`[optionchain] ❌ Error fetching token ${tok}:`, err instanceof Error ? err.message : String(err))
+      }
     }
+
+    // Helper to add delay between batches
+    const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
     // Pass 1: sample every Nth strike evenly to find the liquid zone (ATM detection)
     const SAMPLE_SIZE = 30
@@ -253,9 +258,13 @@ export async function GET(req: NextRequest) {
 
     for (let i = 0; i < pass1Tokens.length; i += CONCURRENCY) {
       await Promise.all(pass1Tokens.slice(i, i + CONCURRENCY).map(fetchOne))
+      if (i + CONCURRENCY < pass1Tokens.length) {
+        await delay(100)  // 100ms delay between batches to avoid rate limiting
+      }
     }
 
     console.log(`[optionchain] → pass1 done: ${quoteMap.size}/${pass1Tokens.length} quotes`)
+
 
     /* ---------------------------
        FIND REAL ATM via put-call parity across ALL strikes
@@ -343,7 +352,12 @@ export async function GET(req: NextRequest) {
 
     if (pass2Tokens.length > 0) {
       console.log(`[optionchain] → pass2: fetching ${pass2Tokens.length} missing tokens for visible strikes`)
-      await Promise.all(pass2Tokens.map(fetchOne))
+      for (let i = 0; i < pass2Tokens.length; i += CONCURRENCY) {
+        await Promise.all(pass2Tokens.slice(i, i + CONCURRENCY).map(fetchOne))
+        if (i + CONCURRENCY < pass2Tokens.length) {
+          await delay(100)  // 100ms delay between batches
+        }
+      }
       console.log(`[optionchain] → pass2 done, quoteMap size: ${quoteMap.size}`)
     }
 
@@ -403,16 +417,31 @@ export async function GET(req: NextRequest) {
 
       const ceTok = entry.ce?.p_tok ? String(entry.ce.p_tok) : null
       const peTok = entry.pe?.p_tok ? String(entry.pe.p_tok) : null
-      const ceLtp = ceTok ? (parseFloat(String(quoteMap.get(ceTok)?.ltp ?? 0)) || 0) : 0
-      const peLtp = peTok ? (parseFloat(String(quoteMap.get(peTok)?.ltp ?? 0)) || 0) : 0
+      
+      // Check if we actually have quotes for this strike
+      const ceHasQuote = ceTok ? quoteMap.has(ceTok) : false
+      const peHasQuote = peTok ? quoteMap.has(peTok) : false
+      
+      const ceLtp = ceTok && ceHasQuote ? (parseFloat(String(quoteMap.get(ceTok)?.ltp ?? 0)) || 0) : 0
+      const peLtp = peTok && peHasQuote ? (parseFloat(String(quoteMap.get(peTok)?.ltp ?? 0)) || 0) : 0
 
-      // Skip strikes where both CE and PE have zero price (expired/no data)
-      if (ceLtp === 0 && peLtp === 0) return
+      // Skip ONLY if both quotes were fetched successfully AND both prices are zero
+      // This filters out truly expired strikes but includes strikes with missing quotes
+      if (ceHasQuote && peHasQuote && ceLtp === 0 && peLtp === 0) {
+        console.log(`[optionchain] → skipping strike ${strike}: both CE/PE fetched but zero LTP`)
+        return
+      }
 
       oc[key] = {}
       if (entry.ce) oc[key].ce = parseLeg(String(entry.ce.p_tok), strike, 'CE')
       if (entry.pe) oc[key].pe = parseLeg(String(entry.pe.p_tok), strike, 'PE')
     })
+
+    console.log('[optionchain] → final oc keys:', Object.keys(oc).length, 'strikes')
+    
+    if (Object.keys(oc).length === 0) {
+      console.warn('[optionchain] ⚠️ Empty option chain! quoteMap size:', quoteMap.size, 'visibleStrikes:', visibleStrikes.length)
+    }
 
     return NextResponse.json({
       status: 'success',

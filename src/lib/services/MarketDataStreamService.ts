@@ -60,7 +60,6 @@ export class MarketDataStreamService {
   private readonly CHANNEL_NUM = 1;
 
   constructor() {
-    console.log('[MarketDataStreamService] Initialized');
   }
 
   /**
@@ -95,19 +94,16 @@ export class MarketDataStreamService {
 
     scripsToSubscribe.forEach((s) => this.subscribedScrips.add(s));
 
-    console.log(`[MarketDataStreamService] Subscribing to ${scripsToSubscribe.length} scrips`);
 
     try {
       await this.startWebSocket(scripsToSubscribe);
       this.startBufferFlush();
     } catch (error) {
-      console.warn('[MarketDataStreamService] WebSocket failed, switching to polling:', error);
       this.mode = 'polling';
       try {
         await this.startPolling(scripsToSubscribe);
         this.startBufferFlush();
       } catch (pollError) {
-        console.error('[MarketDataStreamService] Polling fallback also failed:', pollError);
         throw pollError;
       }
     }
@@ -136,12 +132,10 @@ export class MarketDataStreamService {
             : WebSocket;
 
         const usingSDK = WsClass === (window as any).HSWebSocket;
-        console.log(`[WebSocket-HSM] Connecting to ${this.HSM_URL} via ${usingSDK ? 'HSWebSocket SDK' : 'native WebSocket'}`);
 
         this.ws = new WsClass(this.HSM_URL);
 
         this.ws.onopen = () => {
-          console.log('[WebSocket-HSM] ✅ Connected');
           this.reconnectAttempts = 0;
           this.mode = 'websocket';
 
@@ -170,7 +164,6 @@ export class MarketDataStreamService {
         };
 
         this.ws.onclose = () => {
-          console.log('[WebSocket-HSM] Disconnected');
           this.stopHeartbeat();
           if (this.isActive && this.mode === 'websocket') {
             this.attemptReconnect(scrips);
@@ -178,7 +171,6 @@ export class MarketDataStreamService {
         };
 
         this.ws.onerror = (err: any) => {
-          console.error('[WebSocket-HSM] Error:', err);
           reject(new Error('HSM WebSocket error'));
         };
       } catch (error) {
@@ -198,7 +190,6 @@ export class MarketDataStreamService {
       type: 'cn',
     };
 
-    console.log('[WebSocket-HSM] 🔐 Sending auth...');
     this.ws.send(JSON.stringify(authMsg));
 
     // Start heartbeat (30s interval as per Kotak SDK)
@@ -206,7 +197,6 @@ export class MarketDataStreamService {
     this.heartbeatInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === 1) {
         this.ws.send(JSON.stringify({ type: 'ti', scrips: '' }));
-        console.log('[WebSocket-HSM] 💓 Heartbeat sent');
       }
     }, 30000);
   }
@@ -224,13 +214,11 @@ export class MarketDataStreamService {
    */
   private subscribeToScrips(scrips: string[]): void {
     if (!this.ws || this.ws.readyState !== 1) {
-      console.warn('[WebSocket-HSM] Not open, cannot subscribe');
       return;
     }
 
     const scripsString = scrips.join('&');
     const msg = { type: 'mws', scrips: scripsString, channelnum: this.CHANNEL_NUM };
-    console.log('[WebSocket-HSM] 📤 Subscribing:', scripsString);
     this.ws.send(JSON.stringify(msg));
   }
 
@@ -245,11 +233,9 @@ export class MarketDataStreamService {
 
     // Acknowledgements / status messages
     if (t === 'cn_ack' || t === 'connection_ack' || t === 'ack') {
-      console.log('[WebSocket-HSM] ✅ Auth acknowledged');
       return;
     }
     if (t === 'mws_ack' || t === 'subscribe_ack') {
-      console.log('[WebSocket-HSM] ✅ Subscription acknowledged');
       return;
     }
     if (t === 'ti') {
@@ -294,7 +280,6 @@ export class MarketDataStreamService {
       this.priceBuffer.set(priceUpdate.symbol, priceUpdate);
       if (this.onPriceUpdate) this.onPriceUpdate(priceUpdate);
 
-      console.log(`[WebSocket-HSM] 📈 ${priceUpdate.symbol}: ₹${priceUpdate.ltp.toFixed(2)}`);
     }
   }
 
@@ -332,15 +317,12 @@ export class MarketDataStreamService {
             if (this.onPriceUpdate) this.onPriceUpdate(priceUpdate);
           });
         } catch (error) {
-          console.error('[Polling] Error:', error);
         }
       };
 
       pollingService.startPolling(pollCallback, scrips.length > 0);
       this.isPollingActive = true;
-      console.log('[Polling] Started as WebSocket fallback');
     } catch (error) {
-      console.error('[Polling] Failed to start:', error);
       throw error;
     }
   }
@@ -351,7 +333,6 @@ export class MarketDataStreamService {
 
     this.reconnectAttempts++;
     if (this.reconnectAttempts > this.maxReconnectAttempts) {
-      console.warn('[WebSocket-HSM] Max reconnects reached — switching to polling');
       this.mode = 'polling';
       this.startPolling(scrips).catch(console.error);
       return;

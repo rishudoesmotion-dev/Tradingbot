@@ -161,12 +161,10 @@ export class MarketDataService {
 
   start() {
     if (this.candleIntervalId) return;
-    console.log('[MarketDataService] Starting 5m candle engine');
     const msIn5min  = CANDLE_MINUTES * 60 * 1000;
     const now       = Date.now();
     const nextClose = Math.ceil(now / msIn5min) * msIn5min;
     const delay     = nextClose - now;
-    console.log(`[MarketDataService] First candle close in ${Math.round(delay / 1000)}s`);
     setTimeout(() => {
       this.onCandleClose();
       this.candleIntervalId = setInterval(() => this.onCandleClose(), msIn5min);

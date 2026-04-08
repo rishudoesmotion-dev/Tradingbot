@@ -95,7 +95,6 @@ export default function TradingPanel({
       setTradingEnabled(finalEnabled);
       setTradingDisabledReason(finalReason);
     } catch (error) {
-      console.error("[TradingPanel] Failed to check trading status:", error);
       setTradingEnabled(false);
       setTradingDisabledReason("Unable to check status");
     }
@@ -165,10 +164,10 @@ export default function TradingPanel({
       }
 
       // Selected scrip price: match by full key OR by token alone
-      if (
-        selectedScripKey &&
-        (symbol === selectedScripKey || symbol === selectedScrip?.p_tok || symbol === (selectedScrip?.p_tok ?? ""))
-      ) {
+      const isMatch = selectedScripKey &&
+        (symbol === selectedScripKey || symbol === selectedScrip?.p_tok || symbol === (selectedScrip?.p_tok ?? ""));
+      
+      if (isMatch) {
         setSelectedScripLTP(ltp);
       }
 
@@ -184,7 +183,6 @@ export default function TradingPanel({
       // Fresh start — subscribe everything
       streamScripsRef.current = new Set(scripsArray);
       streamService.subscribe(session, scripsArray, handlePrice).catch((err) => {
-        console.error("[TradingPanel] MarketDataStreamService subscribe failed:", err);
       });
     } else {
       // Already connected — add only NEW scrips
@@ -701,21 +699,39 @@ export default function TradingPanel({
               <PositionsTable
                 positions={trading.positions as any}
                 isLoading={trading.isLoading}
-                onExit={(position) => {
+                onExit={async (position) => {
                   // Pre-fill order form with SELL order for this position
-                  const netQty = (position.buyQuantity || position.quantity || 0) - (position.sellQuantity || 0);
+                  const token = position.tok || position.token || position.p_tok || '';
+                  const exchange = position.exSeg || position.exchange || position.p_exch_seg || 'nse_fo';
+                  const trdSymbol = position.trdSym || position.symbol || position.p_trd_symbol || '';
+                  
+                  // Fetch lot size from database
+                  let lotSize = 75; // Default for NIFTY options
+                  try {
+                    const { data } = await supabase
+                      .from('scrip_master')
+                      .select('l_lot_size')
+                      .eq('p_trd_symbol', trdSymbol)
+                      .eq('segment', exchange)
+                      .single();
+                    if (data?.l_lot_size) lotSize = data.l_lot_size;
+                  } catch (err) {
+                    console.warn('[TradingPanel] Could not fetch lot size, using default:', err);
+                  }
+                  
                   setSelectedScrip({
-                    id: 0,  // Not needed for placing order
+                    id: 0,
                     p_symbol: position.symbol,
-                    p_trd_symbol: position.trdSym || position.symbol,
-                    p_exch_seg: position.exSeg || position.exchange || 'NFO',
-                    p_tok: position.tok || position.token || '',
-                    segment: position.exSeg || position.exchange || 'NFO',
-                    l_lot_size: 1,  // Not needed for exit
+                    p_trd_symbol: trdSymbol,
+                    p_exch_seg: exchange,
+                    p_tok: token,
+                    segment: exchange,
+                    l_lot_size: lotSize,
                     p_instr_name: position.symbol,
                   });
                   setDefaultSide('SELL');
-                  setSelectedScripLTP(position.ltp || position.ltP);
+                  // Don't set cached LTP - let WebSocket update it with live price
+                  setSelectedScripLTP(undefined);
                 }}
                 onRefresh={handleManualRefresh}
               />

@@ -20,7 +20,6 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { step, consumerKey, mobileNumber, ucc, totp, mpin, viewToken, viewSid } = body;
 
-    console.log(`[API] Kotak ${step} request received`);
 
     if (step === 'totp') {
       // Step 2a: TOTP Validation

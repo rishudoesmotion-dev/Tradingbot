@@ -17,7 +17,6 @@ export async function GET(request: NextRequest) {
     const consumerKey = searchParams.get('consumerKey');
     const action = searchParams.get('action');
 
-    console.log(`[API] Kotak Scrip ${action} request received`);
 
     if (!consumerKey) {
       return NextResponse.json(
@@ -36,14 +35,8 @@ export async function GET(request: NextRequest) {
         },
       });
 
-      console.log(`[API] 📥 Scrip Master Response Status:`, response.status, response.statusText);
 
       const data = await response.json();
-      console.log(`[API] 📥 Scrip Master Response:`, {
-        fileCount: data?.data?.filesPaths?.length || 0,
-        baseFolder: data?.data?.baseFolder,
-      });
-
       if (!response.ok) {
         return NextResponse.json(
           {
@@ -54,7 +47,6 @@ export async function GET(request: NextRequest) {
         );
       }
 
-      console.log(`[API] ✅ Scrip master paths retrieved successfully`);
 
       return NextResponse.json({
         success: true,

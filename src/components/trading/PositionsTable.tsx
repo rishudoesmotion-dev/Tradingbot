@@ -19,7 +19,7 @@ interface Position {
 interface PositionsTableProps {
   positions: Position[];
   isLoading: boolean;
-  onExit: (symbol: string) => Promise<void>;
+  onExit: (position: Position) => void;  // Changed: now passes full position and doesn't return Promise
   onRefresh: () => Promise<void>;
 }
 
@@ -190,7 +190,7 @@ export default function PositionsTable({ positions, isLoading, onExit, onRefresh
                     </span>
                     {isOpen ? (
                       <button
-                        onClick={() => onExit(pos.symbol)}
+                        onClick={() => onExit(pos)}
                         disabled={isLoading}
                         className="text-xs text-blue-500 hover:text-red-600 font-semibold transition opacity-0 group-hover:opacity-100 ml-2"
                       >

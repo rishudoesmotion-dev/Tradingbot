@@ -22,7 +22,7 @@ export interface UseTradingActions {
   buy: (config: any) => Promise<void>;
   sell: (config: any) => Promise<void>;
   cancelOrder: (orderId: string) => Promise<void>;
-  modifyOrder: (orderId: string, newPrice: number, quantity: number) => Promise<void>;
+  modifyOrder: (orderId: string, newPrice: number, quantity: number, fullOrder?: any) => Promise<void>;
   exitPosition: (symbol: string) => Promise<void>;
   refreshData: () => Promise<void>;
   getLTP: (symbol: string) => Promise<number>;
@@ -184,11 +184,11 @@ export function useKotakTrading(): UseTradingState & UseTradingActions {
   /**
    * Modify order price / quantity
    */
-  const modifyOrder = async (orderId: string, newPrice: number, quantity: number) => {
+  const modifyOrder = async (orderId: string, newPrice: number, quantity: number, fullOrder?: any) => {
     setState(prev => ({ ...prev, isLoading: true, error: null }));
     try {
       if (!orderId) throw new Error('No order ID provided');
-      const result = await kotakTradingService.modifyOrder(orderId, newPrice, quantity);
+      const result = await kotakTradingService.modifyOrder(orderId, newPrice, quantity, fullOrder);
       if (result.success) {
         await refreshData();
       } else {

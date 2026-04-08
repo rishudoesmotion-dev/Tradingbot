@@ -701,10 +701,21 @@ export default function TradingPanel({
               <PositionsTable
                 positions={trading.positions as any}
                 isLoading={trading.isLoading}
-                onExit={async (symbol) => {
-                  await trading.exitPosition(symbol);
-                  await trading.refreshData();
-                  setLastRefreshed(new Date());
+                onExit={(position) => {
+                  // Pre-fill order form with SELL order for this position
+                  const netQty = (position.buyQuantity || position.quantity || 0) - (position.sellQuantity || 0);
+                  setSelectedScrip({
+                    id: 0,  // Not needed for placing order
+                    p_symbol: position.symbol,
+                    p_trd_symbol: position.trdSym || position.symbol,
+                    p_exch_seg: position.exSeg || position.exchange || 'NFO',
+                    p_tok: position.tok || position.token || '',
+                    segment: position.exSeg || position.exchange || 'NFO',
+                    l_lot_size: 1,  // Not needed for exit
+                    p_instr_name: position.symbol,
+                  });
+                  setDefaultSide('SELL');
+                  setSelectedScripLTP(position.ltp || position.ltP);
                 }}
                 onRefresh={handleManualRefresh}
               />
@@ -717,8 +728,8 @@ export default function TradingPanel({
                   await trading.refreshData();
                   setLastRefreshed(new Date());
                 }}
-                onModify={async (id, price, qty) => {
-                  await trading.modifyOrder(id, price, qty);
+                onModify={async (id, price, qty, fullOrder) => {
+                  await trading.modifyOrder(id, price, qty, fullOrder);
                   await trading.refreshData();
                   setLastRefreshed(new Date());
                 }}

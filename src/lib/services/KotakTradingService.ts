@@ -299,19 +299,36 @@ export class KotakTradingService {
   /**
    * Modify an order's price and/or quantity — uses the proxy
    */
-  async modifyOrder(orderId: string, newPrice: number, quantity: number): Promise<TradeResponse> {
+  async modifyOrder(orderId: string, newPrice: number, quantity: number, fullOrder?: any): Promise<TradeResponse> {
     if (!this.isReady()) {
       return { success: false, message: 'Not authenticated — please reconnect' };
     }
 
     try {
       if (this.sessionInfo) {
-        const result = await this.callTradingAPI('POST', 'modifyOrder', {
+        // Build request with all required Kotak fields
+        const modifyData: any = {
           no:  orderId,
           pr:  String(newPrice),
           qt:  String(quantity),
           vd:  'DAY',
-        });
+        };
+        
+        // If we have the full order, include all required fields
+        if (fullOrder) {
+          modifyData.tk = fullOrder.tok || fullOrder.tk || '';
+          modifyData.ts = fullOrder.trdSym || fullOrder.ts || fullOrder.symbol || '';
+          modifyData.es = fullOrder.exSeg || fullOrder.es || fullOrder.exchange || '';
+          modifyData.pt = fullOrder.prcTp || fullOrder.pt || fullOrder.orderType || 'MKT';
+          modifyData.pc = fullOrder.pCode || fullOrder.pc || fullOrder.productType || 'MIS';
+          modifyData.mp = fullOrder.mktPro || fullOrder.mp || '0';
+          modifyData.dd = fullOrder.discQty || fullOrder.dd || 'NA';
+          modifyData.dq = fullOrder.discQty || fullOrder.dq || '0';
+          modifyData.tp = fullOrder.trgPrc || fullOrder.tp || '0';
+          modifyData.tt = fullOrder.trnsTp || fullOrder.tt || (fullOrder.side?.toLowerCase() === 'buy' ? 'B' : 'S');
+        }
+        
+        const result = await this.callTradingAPI('POST', 'modifyOrder', modifyData);
         const ok = result?.stat === 'Ok' || result?.nOrdNo || result?.success;
         return {
           success: !!ok,
@@ -345,6 +362,21 @@ export class KotakTradingService {
     }
 
     try {
+      // Use proxy via callTradingAPI (works for session-based auth)
+      if (this.sessionInfo) {
+        const result = await this.callTradingAPI('POST', 'exitPosition', {
+          symbol,
+          productType: 'INTRADAY'
+        });
+        const ok = result?.stat === 'Ok' || result?.nOrdNo || result?.success;
+        return {
+          success: !!ok,
+          orderId: result?.nOrdNo || '',
+          message: ok ? `✅ Position exited: ${symbol}` : `❌ Exit failed: ${JSON.stringify(result)}`,
+          data: result,
+        };
+      }
+      // Legacy: direct broker call
       const order = await this.broker!.exitPosition(symbol, ProductType.INTRADAY);
       
       return {
@@ -370,6 +402,18 @@ export class KotakTradingService {
     }
 
     try {
+      // Use proxy via callTradingAPI (works for session-based auth)
+      if (this.sessionInfo) {
+        const result = await this.callTradingAPI('POST', 'exitAllPositions', {});
+        const ok = result?.stat === 'Ok' || result?.success || Array.isArray(result);
+        const orders = Array.isArray(result) ? result : (result?.orders || result?.data || []);
+        return {
+          success: !!ok,
+          message: ok ? `✅ Exited ${orders.length} positions` : `❌ Kill switch failed: ${JSON.stringify(result)}`,
+          data: { exitOrders: orders, count: orders.length },
+        };
+      }
+      // Legacy: direct broker call
       const orders = await this.broker!.exitAllPositions();
       
       return {

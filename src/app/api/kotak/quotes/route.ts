@@ -214,23 +214,110 @@ export async function GET(req: NextRequest) {
   const rate  = parseFloat(sp.get('rate')  ?? String(DEFAULT_RATE));
   const hintTs = sp.get('expiry') ? parseInt(sp.get('expiry')!, 10) : null;
 
-  // ── Validate spot ─────────────────────────────────────────────────────────
+  // ── Read Kotak session — accept headers OR query params ──────────────────
+  // QuotesService sends them as query params; internal option-chain calls use headers.
+  const tradingToken = req.headers.get('x-trading-token') ?? sp.get('tradingToken');
+  const tradingSid   = req.headers.get('x-trading-sid')   ?? sp.get('tradingSid');
+  const baseUrl      = req.headers.get('x-base-url')      ?? sp.get('baseUrl');
+  // consumerKey: prefer explicit param, fall back to env var if param is missing/literally "undefined"
+  const rawConsumerKey = req.headers.get('x-consumer-key') ?? sp.get('consumerKey');
+  const consumerKey = (rawConsumerKey && rawConsumerKey !== 'undefined' && rawConsumerKey !== 'null')
+    ? rawConsumerKey
+    : (process.env.NEXT_PUBLIC_KOTAK_CONSUMER_KEY ?? 'c63d7961-e935-4bce-8183-c63d9d2342f0');
+
+  // ── LTP-only path: QuotesService calls this endpoint with `queries` param ─
+  // QuotesService passes: queries=[{segment,symbol},...], filter, tradingToken, tradingSid, baseUrl, consumerKey
+  // NOTE: must come BEFORE the spot validation below — QuotesService does not pass `spot`
+  const queriesParam = sp.get('queries');
+  const filterParam  = sp.get('filter') ?? 'ltp';
+
+  if (queriesParam && tradingToken && tradingSid && baseUrl && consumerKey) {
+    try {
+      const queries: Array<{ segment: string; symbol: string }> = JSON.parse(queriesParam);
+      if (!queries.length) {
+        return NextResponse.json({ success: true, data: [] });
+      }
+
+      // Kotak Neo quote endpoint:
+      // GET {baseUrl}/script-details/1.0/quotes/neosymbol/{segment}|{token}/all
+      // Requires: Authorization = consumerKey (static UUID), Sid = tradingSid, Auth = tradingToken
+      const CONCURRENCY = 20;
+      const results: any[] = new Array(queries.length).fill(null);
+
+      const kotakAuthHeaders: Record<string, string> = {
+        'Authorization': consumerKey,   // static consumerKey UUID — NOT tradingToken
+        'neo-fin-key':   'neotradeapi',
+        'Sid':           tradingSid,
+        'Auth':          tradingToken,
+        'accept':        'application/json',
+      };
+
+      // Segment → Kotak exchange code map
+      const segToExch: Record<string, string> = {
+        nse_fo: 'nse_fo', nse_cm: 'nse_cm',
+        bse_fo: 'bse_fo', bse_cm: 'bse_cm',
+        cde_fo: 'cde_fo', mcx_fo: 'mcx_fo',
+        NFO: 'nse_fo', NSE: 'nse_cm', BSE: 'bse_cm',
+      };
+
+      const fetchOne = async (idx: number) => {
+        const q    = queries[idx];
+        const exch = segToExch[q.segment] ?? q.segment;
+        const url  = `${baseUrl}/script-details/1.0/quotes/neosymbol/${exch}|${q.symbol}/all`;
+
+        try {
+          const res  = await fetch(url, { method: 'GET', headers: kotakAuthHeaders });
+          const text = await res.text();
+          if (idx === 0) {
+            console.log(`[quotes] script-details [${q.symbol}] status=${res.status} body=${text.substring(0, 300)}`);
+          }
+
+          if (!res.ok) {
+            console.warn(`[quotes] fetchOne HTTP ${res.status} for token=${q.symbol}: ${text.substring(0, 150)}`);
+            results[idx] = null;
+            return;
+          }
+
+          const json = JSON.parse(text);
+          // Response: { data: [ { ltp, lp, open, high, low, close, volume, open_int, ... } ] }
+          // or:       { data: { ltp, ... } }
+          const raw  = json?.data ?? json;
+          const flat = Array.isArray(raw) ? raw[0] : raw;
+
+          if (flat) {
+            results[idx] = { ...flat, _querySymbol: q.symbol, _querySegment: q.segment };
+          } else {
+            results[idx] = null;
+          }
+        } catch (e) {
+          console.error(`[quotes] fetchOne error for token=${q.symbol}:`, e);
+          results[idx] = null;
+        }
+      };
+
+      // Run in batches
+      for (let start = 0; start < queries.length; start += CONCURRENCY) {
+        await Promise.all(
+          queries.slice(start, start + CONCURRENCY).map((_, i) => fetchOne(start + i))
+        );
+      }
+
+      return NextResponse.json({ success: true, data: results });
+    } catch (err: any) {
+      return NextResponse.json({ success: false, error: err?.message ?? 'Quote fetch failed' }, { status: 500 });
+    }
+  }
+
+  const hasSession = !!(tradingToken && tradingSid && baseUrl && consumerKey);
+
+  // ── Validate spot (only needed for the full option-chain path) ────────────
   if (!spot || isNaN(spot) || spot < 1_000)
     return NextResponse.json({ status: 'error', message: 'Missing or invalid `spot` price' }, { status: 400 });
-
-  // ── Read Kotak session from headers ───────────────────────────────────────
-  // Client must forward these from localStorage on every poll request.
-  const tradingToken = req.headers.get('x-trading-token');
-  const tradingSid   = req.headers.get('x-trading-sid');
-  const baseUrl      = req.headers.get('x-base-url');
-  const consumerKey  = req.headers.get('x-consumer-key');
-
-  const hasSession   = !!(tradingToken && tradingSid && baseUrl && consumerKey);
 
   if (!hasSession) {
     return NextResponse.json({
       status:  'error',
-      message: 'Missing Kotak session headers. Forward x-trading-token, x-trading-sid, x-base-url, x-consumer-key from localStorage.',
+      message: 'Missing Kotak session. Provide x-trading-token/x-trading-sid/x-base-url/x-consumer-key headers or tradingToken/tradingSid/baseUrl/consumerKey query params.',
     }, { status: 401 });
   }
 

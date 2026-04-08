@@ -94,6 +94,28 @@ export class QuotesService {
       return { success: false, error: 'No queries provided' };
     }
 
+    // Self-heal: if session was never set (e.g. page refresh), read from localStorage
+    if (!this.session && typeof window !== 'undefined') {
+      try {
+        const stored = JSON.parse(localStorage.getItem('kotak_session') || '{}');
+        if (stored?.tradingToken && stored?.tradingSid && stored?.baseUrl) {
+          // consumerKey is now saved in kotak_session (as of the login fix).
+          // Fall back to the env var / hardcoded UUID if older session lacks it.
+          const consumerKey =
+            stored.consumerKey ||
+            (typeof process !== 'undefined' && process.env?.NEXT_PUBLIC_KOTAK_CONSUMER_KEY) ||
+            'c63d7961-e935-4bce-8183-c63d9d2342f0';
+          this.session = {
+            tradingToken: stored.tradingToken,
+            tradingSid:   stored.tradingSid,
+            baseUrl:      stored.baseUrl,
+            consumerKey,
+          };
+          console.log('[QuotesService] 🔄 Session auto-restored from localStorage');
+        }
+      } catch { /* ignore */ }
+    }
+
     if (!this.session) {
       console.warn('[QuotesService] ⚠️ No session – cannot fetch live quotes');
       return { success: false, error: 'Not authenticated – call setSession() after login' };
@@ -182,9 +204,9 @@ export class QuotesService {
       const exchTok = quote.exchange_token ?? quote.tk ?? quote.pSymbol;
       if (exchTok) result.set(String(exchTok), ltpVal);
 
-      // 2. Key by the original query symbol (e.g. "54883" or "AXISBANK") —
-      //    guarantees the ltpMap.get(quoteSymbol) lookup in useKotakTrading always hits.
-      if (queries[idx]) result.set(queries[idx].symbol, ltpVal);
+      // 2. Key by the original query symbol — injected by the proxy as _querySymbol
+      const querySym = quote._querySymbol ?? (queries[idx]?.symbol);
+      if (querySym) result.set(String(querySym), ltpVal);
 
       // 3. Also key by display_symbol in case it differs from exchange_token
       const dispSym = quote.display_symbol ?? quote.sym ?? quote.tsym;

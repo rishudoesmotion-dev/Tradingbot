@@ -68,7 +68,7 @@ export default function KotakNeoLogin({
 
       // Automatically submit MPIN after brief delay
       setTimeout(() => {
-        completeMpinValidation(service, mpin);
+        completeMpinValidation(service, mpin, consumerKey);
       }, 500);
     } catch (error) {
       setCurrentStep({
@@ -80,7 +80,7 @@ export default function KotakNeoLogin({
     }
   };
 
-  const completeMpinValidation = async (service: KotakAuthService, mpin: string) => {
+  const completeMpinValidation = async (service: KotakAuthService, mpin: string, consumerKey: string) => {
     try {
       setLoading(true);
       const response = await service.validateMpin(mpin);
@@ -96,6 +96,7 @@ export default function KotakNeoLogin({
           tradingToken: response.tradingToken,
           tradingSid: response.tradingSid,
           baseUrl: response.baseUrl,
+          consumerKey,
           headers,
         });
       }

@@ -352,14 +352,17 @@ export class KotakNeoAdapter extends BaseBroker {
       throw new Error('Not authenticated');
     }
 
-    const mappedExchange = this.mapExchange(exchange);
+    // Use the confirmed-working oms/v1/quote/ltp endpoint (numeric token)
     const response = await fetch(
-      `${this.session.baseUrl}/script-details/1.0/quotes/neosymbol/${mappedExchange}|${symbol}/all`,
+      `${this.session.baseUrl}/oms/v1/quote/ltp/${symbol}`,
       {
         method: 'GET',
         headers: {
           'Authorization': this.consumerKey,
-          'Content-Type': 'application/x-www-form-urlencoded',
+          'neo-fin-key':   'neotradeapi',
+          'Sid':           this.session.sid,
+          'Auth':          this.session.sessionToken,
+          'accept':        'application/json',
         },
       }
     );
@@ -369,7 +372,10 @@ export class KotakNeoAdapter extends BaseBroker {
     }
 
     const data = await response.json();
-    return data.data?.price || 0;
+    // Response: { data: { ltp: "22800.50", ... } } or { ltp: "..." }
+    const raw = data?.data ?? data;
+    const ltpVal = parseFloat(String(raw?.ltp ?? raw?.ltP ?? raw?.lp ?? '0'));
+    return isNaN(ltpVal) ? 0 : ltpVal;
   }
 
   /**

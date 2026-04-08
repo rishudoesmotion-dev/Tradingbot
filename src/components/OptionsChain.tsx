@@ -63,7 +63,7 @@ function toScrip(row: any): ScripResult {
     p_instr_name:  row.p_instr_name || '',
     l_expiry_date: row.l_expiry_date,
     segment:       row.segment || 'nse_fo',
-    p_tok:         row.p_tok ?? row.p_symbol,
+    p_tok:         String(row.p_tok ?? row.p_symbol ?? ''),
   };
 }
 
@@ -341,6 +341,26 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
     } catch { /* ignore */ }
   }, []);
 
+  // ── Session bootstrap — restore quotesService session from localStorage ──
+  // Runs once on mount so LTP polling works even after a page refresh
+  // (the in-memory singleton loses session on reload).
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('kotak_session') || '{}');
+      if (stored?.tradingToken && stored?.tradingSid && stored?.baseUrl) {
+        quotesService.setSession({
+          tradingToken: stored.tradingToken,
+          tradingSid:   stored.tradingSid,
+          baseUrl:      stored.baseUrl,
+          consumerKey:  stored.consumerKey || process.env.NEXT_PUBLIC_KOTAK_CONSUMER_KEY || 'c63d7961-e935-4bce-8183-c63d9d2342f0',
+        });
+        log('✅ quotesService session restored from localStorage');
+      } else {
+        log('⚠️ No kotak_session in localStorage — LTP polling will be skipped');
+      }
+    } catch { /* ignore */ }
+  }, []);
+
   // ── Step 1: Load expiries ─────────────────────────────────────────────────
 
   useEffect(() => {
@@ -431,10 +451,26 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
   }, [niftyLTP]);
 
   const fetchSpot = useCallback(async () => {
-    if (niftyLTP && niftyLTP > 1000) return;
+    if (niftyLTP && niftyLTP > 1000) return;          // already have live WS price
     if (isFetchingSpot.current) return;
     isFetchingSpot.current = true;
     try {
+      // Primary: fetch NIFTY 50 index directly (token 26000, nse_cm)
+      const res = await quotesService.getQuotes(
+        [{ segment: 'nse_cm', symbol: '26000' }], 'ltp'
+      );
+      if (res.success && res.data?.length) {
+        const q   = res.data[0] as any;
+        const ltp = parseFloat(String(q.ltp ?? q.ltP ?? q.lp ?? q.last_price ?? 0));
+        if (ltp > 10000) {
+          log('fetchSpot via NIFTY index LTP:', ltp);
+          setSpot(Math.round(ltp));
+          setSpotLoading(false);
+          return;
+        }
+      }
+
+      // Fallback: derive from near-ATM option LTPs (CE strike + CE price ≈ spot)
       const nowTs = Math.floor(Date.now() / 1000);
       const { data: foRows } = await supabase
         .from('scrip_master')
@@ -443,32 +479,34 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
         .eq('segment', 'nse_fo')
         .gte('l_expiry_date', nowTs)
         .order('l_expiry_date', { ascending: true })
-        .limit(30);
+        .limit(20);
 
       if (!foRows?.length) { setSpotLoading(false); return; }
 
       const batch = foRows.slice(0, 10);
-      const res   = await quotesService.getQuotes(
+      const res2  = await quotesService.getQuotes(
         batch.map(r => ({ segment: 'nse_fo', symbol: r.p_tok ?? r.p_symbol })), 'ltp'
       );
 
-      if (res.success && res.data?.length) {
+      if (res2.success && res2.data?.length) {
         let bestSpot = 0;
-        for (let i = 0; i < (res.data as any[]).length; i++) {
-          const q      = res.data[i] as any;
-          const ltp    = parseFloat(String(q.ltp ?? q.ltP ?? q.lp ?? 0));
-          const sym    = batch[i]?.p_trd_symbol || '';
-          // Updated regex: handles weekly (no padding) + monthly
-          const m      = sym.toUpperCase().match(/(\d{5,6})(CE|PE)$/);
+        for (let i = 0; i < (res2.data as any[]).length; i++) {
+          const q   = res2.data[i] as any;
+          const ltp = parseFloat(String(q.ltp ?? q.ltP ?? q.lp ?? 0));
+          const sym = batch[i]?.p_trd_symbol || '';
+          const m   = sym.toUpperCase().match(/^[A-Z]+\d{5}(\d+)(CE|PE)$/);
           if (m && ltp > 0) {
-            const parsed = parseInt(m[1], 10);
-            if (parsed >= 1_000 && parsed <= 99_999) {
-              const approxSpot = parsed + ltp;
-              if (approxSpot > bestSpot) bestSpot = approxSpot;
+            const strike = parseInt(m[1], 10);
+            if (strike >= 10_000 && strike <= 35_000) {
+              const approxSpot = strike + (m[2] === 'CE' ? ltp : -ltp);
+              if (approxSpot > 10_000 && approxSpot > bestSpot) bestSpot = approxSpot;
             }
           }
         }
-        if (bestSpot > 1000) setSpot(Math.round(bestSpot));
+        if (bestSpot > 10_000) {
+          log('fetchSpot via option derivation:', Math.round(bestSpot));
+          setSpot(Math.round(bestSpot));
+        }
       }
       setSpotLoading(false);
     } catch (err) {
@@ -547,8 +585,8 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
         return Math.abs(s - atm) < Math.abs(allStrikes[bestIdx] - atm) ? idx : bestIdx;
       }, 0);
 
-      const start          = Math.max(0, atmIdx - 5);
-      const end            = Math.min(allStrikes.length - 1, atmIdx + 5);
+      const start          = Math.max(0, atmIdx - 2);
+      const end            = Math.min(allStrikes.length - 1, atmIdx + 2);
       const visibleStrikes = new Set(allStrikes.slice(start, end + 1));
       log(`ATM idx: ${atmIdx} (strike=${allStrikes[atmIdx]}) | Visible:`, Array.from(visibleStrikes));
 
@@ -568,8 +606,8 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
           const e       = strikeMap.get(strike)!;
           const ceScrip = e.ce ? toScrip(e.ce) : null;
           const peScrip = e.pe ? toScrip(e.pe) : null;
-          const ceLtp   = ceScrip ? (ltpMapRef.current.get(ceScrip.p_tok ?? '') ?? 0) : 0;
-          const peLtp   = peScrip ? (ltpMapRef.current.get(peScrip.p_tok ?? '') ?? 0) : 0;
+          const ceLtp   = ceScrip ? (ltpMapRef.current.get(String(ceScrip.p_tok ?? '')) ?? 0) : 0;
+          const peLtp   = peScrip ? (ltpMapRef.current.get(String(peScrip.p_tok ?? '')) ?? 0) : 0;
           return {
             strike,
             ce: ceScrip ? { scrip: ceScrip, ltp: ceLtp, ltpLoading: ceLtp === 0 } : null,
@@ -587,18 +625,28 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
     }
   }, []);
 
-  const lastAtmRef = useRef<number>(0);
+  const lastAtmRef    = useRef<number>(0);
+  const lastExpiryRef = useRef<string>('');
+
   useEffect(() => {
     if (!selectedExpiry) return;
-    const currentSpot = niftyLTP ?? spot ?? 24500;
-    const newAtm      = roundToNearest50(currentSpot);
-    if (newAtm !== lastAtmRef.current || selectedExpiry.raw !== (window as any).__lastExpiry) {
-      lastAtmRef.current           = newAtm;
-      (window as any).__lastExpiry = selectedExpiry.raw;
+    // Use niftyLTP first, then fetched spot, then no fallback — wait for real price
+    const currentSpot = niftyLTP ?? spot;
+    // Don't load with a made-up fallback — if we have no spot yet, wait
+    if (!currentSpot || currentSpot < 1000) return;
+
+    const newAtm = roundToNearest50(currentSpot);
+    const atmChanged    = newAtm !== lastAtmRef.current;
+    const expiryChanged = selectedExpiry.raw !== lastExpiryRef.current;
+
+    // Reload when expiry changes, OR when ATM shifts by more than 1 step (50pts)
+    if (expiryChanged || Math.abs(newAtm - lastAtmRef.current) >= 50) {
+      lastAtmRef.current    = newAtm;
+      lastExpiryRef.current = selectedExpiry.raw;
       loadChain(selectedExpiry, currentSpot);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedExpiry?.raw, roundToNearest50(niftyLTP ?? spot ?? 24500)]);
+  }, [selectedExpiry?.raw, niftyLTP, spot]);
 
   // ── Step 4: Auto-scroll to ATM ────────────────────────────────────────────
 
@@ -623,8 +671,8 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
     type Q = { rowIdx: number; side: 'ce' | 'pe'; tok: string };
     const queries: Q[] = [];
     current.forEach((row, i) => {
-      if (row.ce?.scrip.p_tok) queries.push({ rowIdx: i, side: 'ce', tok: row.ce.scrip.p_tok });
-      if (row.pe?.scrip.p_tok) queries.push({ rowIdx: i, side: 'pe', tok: row.pe.scrip.p_tok });
+      if (row.ce?.scrip.p_tok) queries.push({ rowIdx: i, side: 'ce', tok: String(row.ce.scrip.p_tok) });
+      if (row.pe?.scrip.p_tok) queries.push({ rowIdx: i, side: 'pe', tok: String(row.pe.scrip.p_tok) });
     });
     if (!queries.length) return;
 

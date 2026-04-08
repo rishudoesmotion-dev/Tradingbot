@@ -23,7 +23,7 @@ interface OrdersTableProps {
   orders: Order[];
   isLoading: boolean;
   onCancel: (orderId: string) => Promise<void>;
-  onModify: (orderId: string, newPrice: number, quantity: number) => Promise<void>;
+  onModify: (orderId: string, newPrice: number, quantity: number, fullOrder?: any) => Promise<void>;
   onRefresh: () => Promise<void>;
 }
 
@@ -106,7 +106,7 @@ export default function OrdersTable({ orders, isLoading, onCancel, onModify, onR
     if (isNaN(qty)   || qty   <= 0) return;
     setModifying(true);
     try {
-      await onModify(getOrderId(modifyOrder), price, qty);
+      await onModify(getOrderId(modifyOrder), price, qty, modifyOrder);
       setModifyOrder(null);
     } finally {
       setModifying(false);

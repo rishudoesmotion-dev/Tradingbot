@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef } from 'react';
 import { ScripResult } from '@/lib/services/ScripSearchService';
-import { TrendingUp, TrendingDown, Loader2, CheckCircle, AlertCircle, X, ShieldOff } from 'lucide-react';
+import { TrendingUp, TrendingDown, Loader2, CheckCircle, AlertCircle, X, ShieldOff, Pin, PinOff } from 'lucide-react';
+import { tradingConfigService } from '@/lib/services/TradingConfigService';
 
 interface OrderFormProps {
   selectedScrip: ScripResult | null;
@@ -11,6 +12,8 @@ interface OrderFormProps {
   isLoading: boolean;
   currentLTP?: number;
   isTradingEnabled: boolean;           // ← NEW prop
+  isPinned: boolean;                   // ← NEW: Whether this scrip is pinned
+  onTogglePin: () => void;             // ← NEW: Handler to toggle pin state
   onPlaceOrder: (order: OrderPayload) => Promise<{ success: boolean; message: string }>;
   onClear: () => void;
 }
@@ -67,6 +70,8 @@ export default function OrderForm({
   isLoading,
   currentLTP,
   isTradingEnabled,   // ← destructure new prop
+  isPinned,           // ← NEW
+  onTogglePin,        // ← NEW
   onPlaceOrder,
   onClear,
 }: OrderFormProps) {
@@ -80,10 +85,23 @@ export default function OrderForm({
   const [result, setResult]           = useState<{ success: boolean; message: string } | null>(null);
   const [submitting, setSubmitting]   = useState(false);
 
+  // ── Max lots restriction from trading_config ─────────────────────────────
+  const [maxLots, setMaxLots] = useState<number>(1);
+
   const [displayedLTP, setDisplayedLTP]   = useState<number>(0);
   const [ltpFlash, setLtpFlash]           = useState<'up' | 'down' | null>(null);
   const prevLTPRef                         = useRef<number>(0);
   const flashTimerRef                      = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Fetch max lots from trading_config on mount ──────────────────────────
+  useEffect(() => {
+    tradingConfigService.getMaxLots().then(max => {
+      setMaxLots(max);
+    }).catch(err => {
+      console.error('[OrderForm] Failed to fetch max lots:', err);
+      setMaxLots(1); // Safe default
+    });
+  }, []);
 
   useEffect(() => {
     if (!currentLTP || currentLTP <= 0) return;
@@ -178,9 +196,26 @@ export default function OrderForm({
                   {(selectedScrip.segment || selectedScrip.p_exch_seg || '').toUpperCase()}
                 </span>
               </div>
-              <button onClick={onClear} className="text-gray-300 hover:text-gray-500 flex-shrink-0">
-                <X size={14} />
-              </button>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                <button 
+                  onClick={onTogglePin}
+                  title={isPinned ? "Unpin (window will close when switching pages)" : "Pin (keep window open when switching pages)"}
+                  className={`p-1 rounded transition ${
+                    isPinned 
+                      ? 'text-blue-600 hover:text-blue-700 hover:bg-blue-50' 
+                      : 'text-gray-300 hover:text-gray-500 hover:bg-gray-50'
+                  }`}
+                >
+                  {isPinned ? <Pin size={14} /> : <PinOff size={14} />}
+                </button>
+                <button 
+                  onClick={onClear} 
+                  title="Clear selection"
+                  className="text-gray-300 hover:text-gray-500"
+                >
+                  <X size={14} />
+                </button>
+              </div>
             </div>
 
             <div className="flex gap-3 text-xs text-gray-400 mb-3">
@@ -288,20 +323,44 @@ export default function OrderForm({
 
           {/* ── Lots ── */}
           <div>
-            <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1.5">Lots</label>
+            <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-1.5">
+              Lots {maxLots > 1 && <span className="text-gray-500 font-normal">(Max: {maxLots})</span>}
+            </label>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setLots(l => Math.max(1, l - 1))}
                 className="w-8 h-8 rounded-lg border border-gray-200 bg-white text-gray-600 font-bold text-base hover:bg-gray-50 hover:border-gray-300 transition flex items-center justify-center flex-shrink-0"
               >−</button>
               <input
-                type="number" value={lots} min="1"
-                onChange={e => setLots(Math.max(1, parseInt(e.target.value) || 1))}
+                type="number" 
+                value={lots} 
+                min="1"
+                max={maxLots}
+                onChange={e => {
+                  const val = parseInt(e.target.value) || 1;
+                  setLots(Math.max(1, Math.min(maxLots, val)));
+                }}
+                onKeyDown={e => {
+                  // Handle arrow keys
+                  if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setLots(l => Math.min(maxLots, l + 1));
+                  } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setLots(l => Math.max(1, l - 1));
+                  }
+                }}
+                onBlur={e => {
+                  // Ensure value is within bounds on blur
+                  const val = parseInt(e.target.value) || 1;
+                  setLots(Math.max(1, Math.min(maxLots, val)));
+                }}
                 className="flex-1 text-center py-1.5 border border-gray-200 rounded-lg text-sm font-bold text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
               <button
-                onClick={() => setLots(l => l + 1)}
-                className="w-8 h-8 rounded-lg border border-gray-200 bg-white text-gray-600 font-bold text-base hover:bg-gray-50 hover:border-gray-300 transition flex items-center justify-center flex-shrink-0"
+                onClick={() => setLots(l => Math.min(maxLots, l + 1))}
+                disabled={lots >= maxLots}
+                className="w-8 h-8 rounded-lg border border-gray-200 bg-white text-gray-600 font-bold text-base hover:bg-gray-50 hover:border-gray-300 transition flex items-center justify-center flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
               >+</button>
             </div>
             <div className="flex justify-between items-center mt-1 px-0.5">

@@ -41,6 +41,11 @@ interface TradingPanelProps {
 
 type BottomTab = "positions" | "orders" | "chain" | "alerts" | "ai";
 
+interface PinnedScripData {
+  scrip: ScripResult;
+  side: "BUY" | "SELL";
+}
+
 export default function TradingPanel({
   sessionInfo,
   onSessionExpired,
@@ -63,6 +68,9 @@ export default function TradingPanel({
   const [showRules, setShowRules] = useState(false);
   const [niftyLTP, setNiftyLTP] = useState<number | null>(null);
 
+  // ── Sticky/Pinned scrip state ────────────────────────────────────────────
+  const [isPinned, setIsPinned] = useState<boolean>(false);
+
   // Cache userId to avoid async lookup on every order
   const userIdRef = useRef<string>("");
   useEffect(() => {
@@ -70,6 +78,40 @@ export default function TradingPanel({
       userIdRef.current = data.user?.id ?? "";
     });
   }, []);
+
+  // ── Restore pinned scrip from localStorage on mount ──────────────────────
+  useEffect(() => {
+    try {
+      const pinnedData = localStorage.getItem('trading_pinned_scrip');
+      if (pinnedData) {
+        const parsed: PinnedScripData = JSON.parse(pinnedData);
+        setSelectedScrip(parsed.scrip);
+        setDefaultSide(parsed.side);
+        setIsPinned(true);
+      }
+    } catch (error) {
+      console.error('[TradingPanel] Error restoring pinned scrip:', error);
+    }
+  }, []); // Run once on mount
+
+  // ── Save pinned scrip to localStorage whenever it changes ────────────────
+  useEffect(() => {
+    if (isPinned && selectedScrip) {
+      const pinnedData: PinnedScripData = {
+        scrip: selectedScrip,
+        side: defaultSide,
+      };
+      localStorage.setItem('trading_pinned_scrip', JSON.stringify(pinnedData));
+    } else if (!isPinned) {
+      // Clear from storage when unpinned
+      localStorage.removeItem('trading_pinned_scrip');
+    }
+  }, [isPinned, selectedScrip, defaultSide]);
+
+  // Handler to toggle pin state
+  const handleTogglePin = () => {
+    setIsPinned(prev => !prev);
+  };
 
   // ── Connect with session on mount ────────────────────────────────────────
   useEffect(() => {
@@ -591,10 +633,15 @@ export default function TradingPanel({
               isLoading={trading.isLoading}
               currentLTP={selectedScripLTP}
               isTradingEnabled={tradingEnabled ?? false}
+              isPinned={isPinned}
+              onTogglePin={handleTogglePin}
               onPlaceOrder={handlePlaceOrder}
               onClear={() => {
-                setSelectedScrip(null);
-                setSelectedScripLTP(undefined);
+                // Only clear if not pinned
+                if (!isPinned) {
+                  setSelectedScrip(null);
+                  setSelectedScripLTP(undefined);
+                }
               }}
             />
           </div>

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useKotakTrading } from "@/hooks/useKotakTrading";
 import { getDynamicPollingService } from "@/lib/services/DynamicPollingService";
 import { tradingRulesService } from "@/lib/services/TradingRulesService";
+import { tradingConfigService } from "@/lib/services/TradingConfigService";
 import { ScripResult } from "@/lib/services/ScripSearchService";
 import { isMarketOpen } from "@/lib/utils/marketHours";
 import { getTradesService } from "@/lib/services/TradesService";
@@ -324,6 +325,45 @@ export default function TradingPanel({
     order: OrderPayload,
   ): Promise<{ success: boolean; message: string }> => {
     try {
+      // ── VALIDATION: Check for concurrent trades ────────────────────────────
+      // Get trading config to check if concurrent trades are prevented
+      const config = await tradingConfigService.getConfig();
+      
+      if (config.prevent_concurrent_trades) {
+        // Check if there are any open positions
+        const openPositions = trading.positions.filter(p => (p.quantity || 0) !== 0);
+        
+        if (openPositions.length > 0) {
+          // Check if this order is closing an existing position
+          const matchingPosition = openPositions.find(pos => 
+            pos.symbol === order.trdSymbol || 
+            pos.symbol === order.symbol
+          );
+          
+          if (matchingPosition) {
+            // This order is closing an existing position - allow it
+            const isClosingOrder = (
+              (matchingPosition.quantity > 0 && order.side === 'SELL') || // Long position, selling
+              (matchingPosition.quantity < 0 && order.side === 'BUY')     // Short position, buying
+            );
+            
+            if (!isClosingOrder) {
+              // Trying to add to position - block it
+              return {
+                success: false,
+                message: '❌ Cannot add to existing position. Concurrent trades are disabled. Close current position first.',
+              };
+            }
+          } else {
+            // There's an open position in a different symbol - block new position
+            return {
+              success: false,
+              message: `❌ Cannot open new position. You have an open position in ${openPositions[0].symbol}. Close it first (concurrent trades disabled).`,
+            };
+          }
+        }
+      }
+
       // Read session synchronously from localStorage — zero latency
       const storedAuth = localStorage.getItem("kotak_session");
       if (!storedAuth) throw new Error("Session not found. Please login again.");
@@ -635,6 +675,8 @@ export default function TradingPanel({
               isTradingEnabled={tradingEnabled ?? false}
               isPinned={isPinned}
               onTogglePin={handleTogglePin}
+              hasOpenPositions={trading.positions.filter(p => (p.quantity || 0) !== 0).length > 0}
+              openPositionSymbol={trading.positions.filter(p => (p.quantity || 0) !== 0)[0]?.symbol}
               onPlaceOrder={handlePlaceOrder}
               onClear={() => {
                 // Only clear if not pinned

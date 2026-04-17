@@ -58,6 +58,7 @@ export default function OrdersTable({ orders, isLoading, onCancel, onModify, onR
   const [modifyOrder, setModifyOrder] = useState<Order | null>(null);
   const [modifyPrice, setModifyPrice] = useState('');
   const [modifyQty,   setModifyQty]   = useState('');
+  const [modifyTriggerPrice, setModifyTriggerPrice] = useState(''); // NEW: For SL orders
   const [modifying,   setModifying]   = useState(false);
 
   // Sort newest-first
@@ -90,11 +91,19 @@ export default function OrdersTable({ orders, isLoading, onCancel, onModify, onR
   const getOrderId = (o: Order): string =>
     o.nOrdNo || o.orderId || o.order_id || o.id || '';
 
+  // Check if order is SL type
+  const isSLOrder = (order: Order): boolean => {
+    const orderType = order.orderType || order.prcTp || order.pt || '';
+    return orderType === 'SL' || orderType === 'SL-M';
+  };
+
   const openModify = (order: Order) => {
     const limitPrice = order.price ?? parseFloat(order.prc || '0');
+    const triggerPrice = parseFloat(order.trgPrc || order.tp || '0');
     const qty = order.quantity ?? parseInt(order.qty || '0');
     setModifyOrder(order);
     setModifyPrice(limitPrice > 0 ? String(limitPrice) : '');
+    setModifyTriggerPrice(triggerPrice > 0 ? String(triggerPrice) : '');
     setModifyQty(qty > 0 ? String(qty) : '');
   };
 
@@ -102,11 +111,25 @@ export default function OrdersTable({ orders, isLoading, onCancel, onModify, onR
     if (!modifyOrder) return;
     const price = parseFloat(modifyPrice);
     const qty   = parseInt(modifyQty);
+    const triggerPrice = parseFloat(modifyTriggerPrice);
+    
     if (isNaN(price) || price <= 0) return;
     if (isNaN(qty)   || qty   <= 0) return;
+    
+    // For SL orders, trigger price is required
+    if (isSLOrder(modifyOrder) && (isNaN(triggerPrice) || triggerPrice <= 0)) {
+      alert('Trigger price is required for SL orders');
+      return;
+    }
+    
     setModifying(true);
     try {
-      await onModify(getOrderId(modifyOrder), price, qty, modifyOrder);
+      // Update the fullOrder with the new trigger price for SL orders
+      const updatedOrder = isSLOrder(modifyOrder) 
+        ? { ...modifyOrder, tp: String(triggerPrice), trgPrc: String(triggerPrice) }
+        : modifyOrder;
+        
+      await onModify(getOrderId(modifyOrder), price, qty, updatedOrder);
       setModifyOrder(null);
     } finally {
       setModifying(false);
@@ -130,16 +153,38 @@ export default function OrdersTable({ orders, isLoading, onCancel, onModify, onR
               <span className={(modifyOrder.side?.toUpperCase() === 'BUY' || modifyOrder.trnsTp === 'B') ? 'text-green-600 font-semibold' : 'text-red-600 font-semibold'}>
                 {(modifyOrder.side?.toUpperCase() === 'BUY' || modifyOrder.trnsTp === 'B') ? 'BUY' : 'SELL'}
               </span>
+              {isSLOrder(modifyOrder) && (
+                <span className="ml-2 text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded font-semibold">
+                  SL
+                </span>
+              )}
             </p>
             <div className="space-y-3">
+              {isSLOrder(modifyOrder) && (
+                <div>
+                  <label className="text-xs text-gray-500 mb-1 block">
+                    Trigger Price (₹) <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={modifyTriggerPrice}
+                    onChange={e => setModifyTriggerPrice(e.target.value)}
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Enter trigger price"
+                    step="0.05"
+                  />
+                </div>
+              )}
               <div>
-                <label className="text-xs text-gray-500 mb-1 block">New Price (₹)</label>
+                <label className="text-xs text-gray-500 mb-1 block">
+                  {isSLOrder(modifyOrder) ? 'Limit Price (₹)' : 'New Price (₹)'}
+                </label>
                 <input
                   type="number"
                   value={modifyPrice}
                   onChange={e => setModifyPrice(e.target.value)}
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="Enter new price"
+                  placeholder={isSLOrder(modifyOrder) ? "Enter limit price" : "Enter new price"}
                   step="0.05"
                 />
               </div>

@@ -11,11 +11,13 @@ interface OrderFormProps {
   isConnected: boolean;
   isLoading: boolean;
   currentLTP?: number;
-  isTradingEnabled: boolean;           // ← NEW prop
-  isPinned: boolean;                   // ← NEW: Whether this scrip is pinned
-  onTogglePin: () => void;             // ← NEW: Handler to toggle pin state
-  hasOpenPositions?: boolean;          // ← NEW: Whether user has any open positions
-  openPositionSymbol?: string;         // ← NEW: Symbol of the open position (if any)
+  isTradingEnabled: boolean;           // ← Trading enabled/disabled
+  isPinned: boolean;                   // ← Whether this scrip is pinned
+  onTogglePin: () => void;             // ← Handler to toggle pin state
+  hasOpenPositions?: boolean;          // ← Whether user has any open positions
+  openPositionSymbol?: string;         // ← Symbol of the open position (if any)
+  canTrade?: boolean;                  // ← NEW: Whether more trades allowed (from trade counter)
+  tradeCount?: { total: number; maxAllowed: number }; // ← NEW: Current trade count
   onPlaceOrder: (order: OrderPayload) => Promise<{ success: boolean; message: string }>;
   onClear: () => void;
 }
@@ -71,11 +73,13 @@ export default function OrderForm({
   isConnected,
   isLoading,
   currentLTP,
-  isTradingEnabled,   // ← destructure new prop
-  isPinned,           // ← NEW
-  onTogglePin,        // ← NEW
-  hasOpenPositions,   // ← NEW
-  openPositionSymbol, // ← NEW
+  isTradingEnabled,   // ← Trading enabled/disabled
+  isPinned,           // ← Pinned state
+  onTogglePin,        // ← Toggle pin handler
+  hasOpenPositions,   // ← Has open positions
+  openPositionSymbol, // ← Open position symbol
+  canTrade = true,    // ← NEW: Can place more trades
+  tradeCount,         // ← NEW: Trade count info
   onPlaceOrder,
   onClear,
 }: OrderFormProps) {
@@ -292,13 +296,31 @@ export default function OrderForm({
             </div>
           )}
 
+          {/* ── Daily Trade Limit Warning ── */}
+          {!canTrade && tradeCount && (
+            <div className="bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-2">
+              <AlertCircle size={14} className="text-red-600 mt-0.5 flex-shrink-0" />
+              <div className="text-xs text-red-800">
+                <p className="font-semibold mb-0.5">🛑 Daily Trade Limit Reached</p>
+                <p className="text-red-700">
+                  You've completed <span className="font-bold">{tradeCount.total}/{tradeCount.maxAllowed}</span> trades today. 
+                  BUY orders are disabled.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* ── BUY / SELL toggle ── */}
           <div className="grid grid-cols-2 rounded-lg overflow-hidden border border-gray-200 shadow-sm w-full min-w-0">
             <button
               onClick={() => setSide('BUY')}
+              disabled={!canTrade} // ← Disable BUY when trade limit reached
               className={`w-full min-w-0 py-2.5 text-xs font-bold tracking-wide transition-all ${
-                isBuy ? 'bg-emerald-500 text-white' : 'bg-white text-gray-400 hover:bg-emerald-50 hover:text-emerald-600'
+                isBuy ? 'bg-emerald-500 text-white' : 
+                !canTrade ? 'bg-gray-100 text-gray-300 cursor-not-allowed' :
+                'bg-white text-gray-400 hover:bg-emerald-50 hover:text-emerald-600'
               }`}
+              title={!canTrade && tradeCount ? `Trade limit reached (${tradeCount.total}/${tradeCount.maxAllowed})` : ''}
             >▲ BUY</button>
             <button
               onClick={() => setSide('SELL')}

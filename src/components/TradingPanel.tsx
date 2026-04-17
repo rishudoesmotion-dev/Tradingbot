@@ -5,6 +5,7 @@ import { useKotakTrading } from "@/hooks/useKotakTrading";
 import { getDynamicPollingService } from "@/lib/services/DynamicPollingService";
 import { tradingRulesService } from "@/lib/services/TradingRulesService";
 import { tradingConfigService } from "@/lib/services/TradingConfigService";
+import { tradeCounterService } from "@/lib/services/TradeCounterService";
 import { ScripResult } from "@/lib/services/ScripSearchService";
 import { isMarketOpen } from "@/lib/utils/marketHours";
 import { getTradesService } from "@/lib/services/TradesService";
@@ -34,6 +35,7 @@ import {
 } from "lucide-react";
 import AIAnalysisPanel from "./trading/Aianalysispanel";
 import DeactivateTradingButton from "./deactiveButton";
+import TradesCounter from "./TradesCounter";
 
 interface TradingPanelProps {
   sessionInfo: any;
@@ -71,6 +73,13 @@ export default function TradingPanel({
 
   // ── Sticky/Pinned scrip state ────────────────────────────────────────────
   const [isPinned, setIsPinned] = useState<boolean>(false);
+
+  // ── Trade count state (client-side cache) ─────────────────────────────────
+  const [tradeCount, setTradeCount] = useState({
+    total: 0,
+    maxAllowed: 3,
+    canTrade: true,
+  });
 
   // Cache userId to avoid async lookup on every order
   const userIdRef = useRef<string>("");
@@ -148,6 +157,27 @@ export default function TradingPanel({
     const interval = setInterval(refreshTradingStatus, 10000);
     return () => clearInterval(interval);
   }, [refreshTradingStatus]);
+
+  // ── Fetch trade count from orders (simple count of completed BUY/SELL) ───
+  const refreshTradeCount = useCallback(async () => {
+    try {
+      const count = await tradeCounterService.getTodayTradeCountFromOrders(trading.orders);
+      setTradeCount({
+        total: count.total,
+        maxAllowed: count.maxAllowed,
+        canTrade: count.canTrade,
+      });
+    } catch (error) {
+      console.error('[TradingPanel] Error fetching trade count:', error);
+    }
+  }, [trading.orders]);
+
+  useEffect(() => {
+    refreshTradeCount();
+    // Refresh every 5 seconds for near real-time updates
+    const interval = setInterval(refreshTradeCount, 5000);
+    return () => clearInterval(interval);
+  }, [refreshTradeCount]);
 
   // ── Single MarketDataStreamService for ALL live prices ───────────────────
   // Subscribes NIFTY + selected scrip + open positions in ONE WS connection.
@@ -325,7 +355,18 @@ export default function TradingPanel({
     order: OrderPayload,
   ): Promise<{ success: boolean; message: string }> => {
     try {
-      // ── VALIDATION: Check for concurrent trades ────────────────────────────
+      // ── VALIDATION 1: Check daily trade limit (REAL-TIME FROM ORDERS) ──────
+      if (order.side === 'BUY') {
+        const tradeValidation = await tradeCounterService.canPlaceNewTrade(trading.orders);
+        if (!tradeValidation.allowed) {
+          return {
+            success: false,
+            message: `❌ ${tradeValidation.reason}`,
+          };
+        }
+      }
+
+      // ── VALIDATION 2: Check for concurrent trades ──────────────────────────
       // Get trading config to check if concurrent trades are prevented
       const config = await tradingConfigService.getConfig();
       
@@ -426,6 +467,7 @@ export default function TradingPanel({
         if (ok && data?.data?.nOrdNo) {
           // Refresh in background — don't block the success response
           void trading.refreshData().then(() => setLastRefreshed(new Date()));
+          
           return {
             success: true,
             message: `✅ Order placed as LIMIT @ ₹${limitPrice} (MKT rejected). ID: ${data.data.nOrdNo}`,
@@ -436,6 +478,7 @@ export default function TradingPanel({
       if (ok && data?.data?.nOrdNo) {
         // Refresh in background — UI shows success immediately
         void trading.refreshData().then(() => setLastRefreshed(new Date()));
+        
         return { success: true, message: `✅ Order Placed! ID: ${data.data.nOrdNo}` };
       }
 
@@ -483,6 +526,9 @@ export default function TradingPanel({
               {totalPnL >= 0 ? "+" : ""}₹{totalPnL.toFixed(2)}
             </div>
           )}
+
+          {/* Trades Counter - Daily Limit */}
+          {trading.isConnected && <TradesCounter />}
 
           {/* Trading status badge + Deactivate button */}
           {tradingEnabled !== null && (
@@ -677,6 +723,8 @@ export default function TradingPanel({
               onTogglePin={handleTogglePin}
               hasOpenPositions={trading.positions.filter(p => (p.quantity || 0) !== 0).length > 0}
               openPositionSymbol={trading.positions.filter(p => (p.quantity || 0) !== 0)[0]?.symbol}
+              canTrade={tradeCount.canTrade}
+              tradeCount={tradeCount}
               onPlaceOrder={handlePlaceOrder}
               onClear={() => {
                 // Only clear if not pinned

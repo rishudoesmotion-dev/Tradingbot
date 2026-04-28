@@ -42,7 +42,7 @@ interface TradingPanelProps {
   onSessionExpired?: () => void;
 }
 
-type BottomTab = "positions" | "orders" | "chain" | "alerts" | "ai";
+type BottomTab = "positions" | "orders" | "chain" | "alerts" | "ai" | "oichart";
 
 interface PinnedScripData {
   scrip: ScripResult;
@@ -70,6 +70,7 @@ export default function TradingPanel({
   >(null);
   const [showRules, setShowRules] = useState(false);
   const [niftyLTP, setNiftyLTP] = useState<number | null>(null);
+  const [selectedExpiry, setSelectedExpiry] = useState<any>(null);
 
   // ── Sticky/Pinned scrip state ────────────────────────────────────────────
   const [isPinned, setIsPinned] = useState<boolean>(false);
@@ -349,6 +350,14 @@ export default function TradingPanel({
     if (selectedScrip && trdSymbol === selectedScrip.p_trd_symbol) {
       setSelectedScripLTP(ltp);
     }
+  };
+
+  const handleNiftyLTPUpdate = (ltp: number) => {
+    setNiftyLTP(ltp);
+  };
+
+  const handleExpiryUpdate = (expiry: any) => {
+    setSelectedExpiry(expiry);
   };
 
   const handlePlaceOrder = async (
@@ -829,6 +838,17 @@ export default function TradingPanel({
             >
               🧠 AI Analysis
             </button>
+
+            <button
+              onClick={() => setBottomTab("oichart")}
+              className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-semibold border-b-2 transition ${
+                bottomTab === "oichart"
+                  ? "border-blue-500 text-blue-600 bg-white"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              📉 OI Chart
+            </button>
           </div>
 
           <div className="flex-1 overflow-hidden min-h-0">
@@ -890,13 +910,22 @@ export default function TradingPanel({
               />
             ) : bottomTab === "chain" ? (
               <div className="p-4 overflow-auto h-full">
-                <OptionsChain onSelectScrip={handleWatchlistSelect} niftyLTP={niftyLTP} />
+                <OptionsChain 
+                  onSelectScrip={handleWatchlistSelect} 
+                  niftyLTP={niftyLTP}
+                  onNiftyLTPUpdate={handleNiftyLTPUpdate}
+                  onExpiryUpdate={handleExpiryUpdate}
+                />
               </div>
             ) : bottomTab === "alerts" ? (
               <PriceAlerts currentPrice={niftyLTP} />
             ) : bottomTab === "ai" ? (
               <div className="h-full overflow-hidden">
                 <AIAnalysisPanel niftyLTP={niftyLTP} isConnected={trading.isConnected} />
+              </div>
+            ) : bottomTab === "oichart" ? (
+              <div className="h-full overflow-hidden">
+                <OIChart niftyLTP={niftyLTP} selectedExpiry={selectedExpiry} />
               </div>
             ) : <div />}
           </div>

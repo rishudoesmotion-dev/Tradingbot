@@ -38,6 +38,8 @@ interface ExpiryInfo {
 interface OptionsChainProps {
   onSelectScrip: (scrip: ScripResult, side: 'BUY' | 'SELL') => void;
   niftyLTP?: number | null;
+  onNiftyLTPUpdate?: (ltp: number) => void;
+  onExpiryUpdate?: (expiry: any) => void;
 }
 
 // ─── Supabase ─────────────────────────────────────────────────────────────────
@@ -293,7 +295,7 @@ async function fetchChainRows(expiry: ExpiryInfo): Promise<any[]> {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
+export function OptionsChain({ onSelectScrip, niftyLTP, onNiftyLTPUpdate, onExpiryUpdate }: OptionsChainProps) {
   const [spot,           setSpot]           = useState<number | null>(null);
   const [spotLoading,    setSpotLoading]    = useState(true);
   const [expiries,       setExpiries]       = useState<ExpiryInfo[]>([]);
@@ -522,6 +524,33 @@ export function OptionsChain({ onSelectScrip, niftyLTP }: OptionsChainProps) {
     const iv = setInterval(fetchSpot, 10_000);
     return () => clearInterval(iv);
   }, [fetchSpot]);
+
+  // ── Callback effects for parent components ────────────────────────────────
+  useEffect(() => {
+    if (spot && onNiftyLTPUpdate) {
+      onNiftyLTPUpdate(spot);
+    }
+  }, [spot, onNiftyLTPUpdate]);
+
+  useEffect(() => {
+    if (selectedExpiry && onExpiryUpdate) {
+      onExpiryUpdate(selectedExpiry);
+    }
+  }, [selectedExpiry, onExpiryUpdate]);
+
+  // ── Callback useEffects for parent communication ─────────────────────────
+
+  useEffect(() => {
+    if (spot && onNiftyLTPUpdate) {
+      onNiftyLTPUpdate(spot);
+    }
+  }, [spot, onNiftyLTPUpdate]);
+
+  useEffect(() => {
+    if (selectedExpiry && onExpiryUpdate) {
+      onExpiryUpdate(selectedExpiry);
+    }
+  }, [selectedExpiry, onExpiryUpdate]);
 
   // ── Step 3: Build chain ───────────────────────────────────────────────────
 

@@ -8,15 +8,26 @@ import QuickTrade from './QuickTrade_v2';
 import StatsPanel from './StatsPanel';
 import KillSwitch from './KillSwitch';
 import { OptionsChain } from './OptionsChain';
+import { OIChart } from './OIChart';
 import { ScripResult } from '@/lib/services/ScripSearchService';
 
 export default function TradingDashboard() {
   const [selectedScrip, setSelectedScrip] = useState<{ scrip: ScripResult; side: 'BUY' | 'SELL' } | null>(null);
+  const [niftyLTP, setNiftyLTP] = useState<number | null>(null);
+  const [selectedExpiry, setSelectedExpiry] = useState<any>(null);
 
   const handleSelectScrip = (scrip: ScripResult, side: 'BUY' | 'SELL') => {
     setSelectedScrip({ scrip, side });
     // Scroll to QuickTrade component
     document.querySelector('[data-quick-trade]')?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const handleNiftyLTPUpdate = (ltp: number) => {
+    setNiftyLTP(ltp);
+  };
+
+  const handleExpiryUpdate = (expiry: any) => {
+    setSelectedExpiry(expiry);
   };
 
   return (
@@ -33,10 +44,11 @@ export default function TradingDashboard() {
       {/* Right Column - Orders, Positions & Options Chain */}
       <div className="lg:col-span-2">
         <Tabs defaultValue="chain" className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-4">
             <TabsTrigger value="orders">📋 Orders</TabsTrigger>
             <TabsTrigger value="positions">📊 Positions</TabsTrigger>
             <TabsTrigger value="chain">📈 Chain</TabsTrigger>
+            <TabsTrigger value="oichart">📉 OI Chart</TabsTrigger>
           </TabsList>
           
           <TabsContent value="orders" className="mt-4">
@@ -48,7 +60,19 @@ export default function TradingDashboard() {
           </TabsContent>
 
           <TabsContent value="chain" className="mt-4">
-            <OptionsChain onSelectScrip={handleSelectScrip} />
+            <OptionsChain 
+              onSelectScrip={handleSelectScrip} 
+              niftyLTP={niftyLTP}
+              onNiftyLTPUpdate={handleNiftyLTPUpdate}
+              onExpiryUpdate={handleExpiryUpdate}
+            />
+          </TabsContent>
+
+          <TabsContent value="oichart" className="mt-4">
+            <OIChart 
+              niftyLTP={niftyLTP}
+              selectedExpiry={selectedExpiry}
+            />
           </TabsContent>
         </Tabs>
       </div>

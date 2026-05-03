@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { TrendingUp, Activity, CheckCircle2, ShoppingCart, DollarSign } from 'lucide-react';
 import { useKotakTrading } from '@/hooks/useKotakTrading';
+import { TradeCount, tradeCounterService } from '@/lib/services/TradeCounterService';
 
 export default function TradesCounter() {
   const trading = useKotakTrading();

@@ -925,7 +925,7 @@ export default function TradingPanel({
               </div>
             ) : bottomTab === "oichart" ? (
               <div className="h-full overflow-hidden">
-                <OIChart niftyLTP={niftyLTP} selectedExpiry={selectedExpiry} />
+                {/* <OIChart niftyLTP={niftyLTP} selectedExpiry={selectedExpiry} /> */}
               </div>
             ) : <div />}
           </div>

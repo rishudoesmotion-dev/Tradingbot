@@ -8,7 +8,6 @@ import QuickTrade from './QuickTrade_v2';
 import StatsPanel from './StatsPanel';
 import KillSwitch from './KillSwitch';
 import { OptionsChain } from './OptionsChain';
-import { OIChart } from './OIChart';
 import { ScripResult } from '@/lib/services/ScripSearchService';
 
 export default function TradingDashboard() {
@@ -68,12 +67,6 @@ export default function TradingDashboard() {
             />
           </TabsContent>
 
-          <TabsContent value="oichart" className="mt-4">
-            <OIChart 
-              niftyLTP={niftyLTP}
-              selectedExpiry={selectedExpiry}
-            />
-          </TabsContent>
         </Tabs>
       </div>
     </div>

@@ -407,10 +407,10 @@ export function OptionsChain({ onSelectScrip, niftyLTP, onNiftyLTPUpdate, onExpi
 
         log('Timestamp counts:', Array.from(tsCounts.entries()).map(([ts, n]) => `${ts}=${n}`));
 
-        // Keep only timestamps with at least 2 rows (avoids noise)
+        // Keep only timestamps with at least 1 row (weekly options may have fewer strikes)
         const seen = new Map<number, ExpiryInfo>();
         tsCounts.forEach((count, ts) => {
-          if (count < 2 || seen.has(ts)) return;
+          if (count < 1 || seen.has(ts)) return;
           if (ts < nowTs) return;
 
           const d   = new Date(ts * 1000);

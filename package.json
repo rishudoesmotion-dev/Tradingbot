@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "doppler run -- next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "doppler run -- next start",
     "lint": "next lint",
     "resync": "node scripts/resync.js",
     "resync:ts": "ts-node scripts/resync-scrips.ts",

@@ -56,10 +56,17 @@ function convertRecordToSnakeCase(record: ScripRecord): ScripMasterRow {
   };
 }
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
-);
+// ⚠️  Do NOT create a module-level singleton — env vars may not be resolved yet.
+// The client is created fresh inside each request handler instead.
+function getSupabaseAdmin() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const anonKey    = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
+  const key        = serviceKey || anonKey;
+  console.log('[SYNC] getSupabaseAdmin — url present:', !!url, '| service_role key present:', !!serviceKey, '| anon key present:', !!anonKey, '| using service_role:', !!serviceKey);
+  if (!url || !key) throw new Error('Supabase credentials missing from environment');
+  return createClient(url, key);
+}
 
 async function getKotakBaseUrl(consumerKey: string, tradingToken: string, tradingSid: string): Promise<string> {
   const response = await fetch(`${KOTAK_LOGIN_BASE}/tradeApiValidate`, {
@@ -147,7 +154,7 @@ async function downloadAndParseCSV(csvUrl: string, segment: string): Promise<Scr
   return records;
 }
 
-async function syncSegmentData(csvUrl: string, segment: string): Promise<number> {
+async function syncSegmentData(csvUrl: string, segment: string, supabase: ReturnType<typeof getSupabaseAdmin>): Promise<number> {
   const records = await downloadAndParseCSV(csvUrl, segment);
 
   if (records.length === 0) {
@@ -188,7 +195,7 @@ async function syncSegmentData(csvUrl: string, segment: string): Promise<number>
         const { error } = await supabase.from('scrip_master').insert(batch);
         if (error) {
           console.error(`[SYNC] Insert error batch ${actualIdx}:`, error);
-           console.error(`[SYNC] Sample record:`, JSON.stringify(batch[0]));
+          console.error(`[SYNC] Sample record:`, JSON.stringify(batch[0]));
           // Upsert fallback
           const { error: upsertErr } = await supabase
             .from('scrip_master')
@@ -219,6 +226,9 @@ export async function POST(request: NextRequest) {
     }
 
     console.log('[SYNC] Starting full scrip master sync (all segments)...');
+
+    const supabase = getSupabaseAdmin();
+    console.log('[SYNC] Supabase client initialised with service_role key');
 
     if (fullSync) {
       console.log('[SYNC] Full sync: clearing all existing scrip_master data...');
@@ -292,11 +302,11 @@ export async function POST(request: NextRequest) {
     const results: Record<string, number> = {};
 
     for (const csvUrl of filesPaths) {
-      const segmentMatch = csvUrl.match(/(nse_cm|bse_cm|nse_fo|bse_fo|cde_fo)/);
+      const segmentMatch = csvUrl.match(/(nse_cm|bse_cm|nse_fo|bse_fo|cde_fo|mcx_fo|mcx_cm)/);
       const segment      = segmentMatch ? segmentMatch[0] : 'unknown';
 
       console.log(`[SYNC] Processing segment: ${segment}`);
-      results[segment] = await syncSegmentData(csvUrl, segment);
+      results[segment] = await syncSegmentData(csvUrl, segment, supabase);
     }
 
     const totalRecords = Object.values(results).reduce((sum, n) => sum + n, 0);
@@ -329,6 +339,8 @@ export async function POST(request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   try {
+    const supabase = getSupabaseAdmin();
+
     const { data: lastSync } = await supabase
       .from('scrip_sync_log')
       .select('*')
